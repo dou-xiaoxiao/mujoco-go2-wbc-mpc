@@ -50,6 +50,137 @@ class SwingWindow:
         return self.foot, self.start_time, self.duration
 
 
+@dataclass(frozen=True)
+class FootholdPlan:
+    window_id: int
+    foot: str
+    initial_position: Array
+    target_position: Array
+
+
+class RollingFootholdPlanner:
+    """Maintain foothold targets for repeated stepping.
+
+    The planner owns the rolling foot state: stance feet are locked at their
+    latest touchdown positions; when a new swing starts, that foot's target is
+    generated relative to its current locked stance position.
+    """
+
+    def __init__(self, foot_geoms: tuple[str, ...], initial_foot_positions: dict[str, Array], step_delta: Array):
+        self.foot_geoms = foot_geoms
+        self.step_delta = np.asarray(step_delta, dtype=float)
+        if self.step_delta.shape != (3,):
+            raise ValueError(f"step_delta must have shape (3,), got {self.step_delta.shape}")
+        self.locked_positions = {
+            foot: np.asarray(initial_foot_positions[foot], dtype=float).copy()
+            for foot in foot_geoms
+        }
+        self.plans: dict[int, FootholdPlan] = {}
+
+    def start_swing(self, window_id: int, foot: str) -> FootholdPlan:
+        initial = self.locked_positions[foot].copy()
+        plan = FootholdPlan(
+            window_id=window_id,
+            foot=foot,
+            initial_position=initial,
+            target_position=initial + self.step_delta,
+        )
+        self.plans[window_id] = plan
+        return plan
+
+    def touchdown(self, foot: str, actual_position: Array) -> None:
+        self.locked_positions[foot] = np.asarray(actual_position, dtype=float).copy()
+
+    def target_for_window(self, window_id: int) -> Array:
+        return self.plans[window_id].target_position
+
+    def swing_reference(
+        self,
+        window_id: int,
+        swing_height: float,
+        start_time: float,
+        duration: float,
+        time_s: float,
+    ) -> SwingReference:
+        plan = self.plans[window_id]
+        return swing_foothold_reference(
+            initial_position=plan.initial_position,
+            step_delta=plan.target_position - plan.initial_position,
+            swing_height=swing_height,
+            start_time=start_time,
+            duration=duration,
+            time_s=time_s,
+        )
+
+
+class BodyReferencePlanner:
+    """Generate conservative body xy references from support feet."""
+
+    def __init__(self, foot_geoms: tuple[str, ...], support_centroid_ratio: float, pre_shift_time: float):
+        self.foot_geoms = foot_geoms
+        self.support_centroid_ratio = float(support_centroid_ratio)
+        self.pre_shift_time = float(pre_shift_time)
+
+    def reference_xy(
+        self,
+        nominal_body_xy: Array,
+        locked_foot_positions: dict[str, Array],
+        windows: list[SwingWindow],
+        stance_feet_for_swing: dict[str, tuple[str, ...]],
+        time_s: float,
+        active_window_id: int | None,
+        next_window_id: int,
+    ) -> Array:
+        nominal = np.asarray(nominal_body_xy, dtype=float)
+        target = self._target_body_xy_for_window(
+            nominal,
+            locked_foot_positions,
+            windows,
+            stance_feet_for_swing,
+            active_window_id,
+            next_window_id,
+        )
+
+        if active_window_id is not None:
+            return target
+        if next_window_id >= len(windows):
+            return target
+
+        next_window = windows[next_window_id]
+        shift_start = next_window.start_time - self.pre_shift_time
+        if time_s < shift_start:
+            return nominal.copy()
+        if time_s >= next_window.start_time:
+            return target
+
+        ratio = (time_s - shift_start) / self.pre_shift_time
+        s, _, _ = smoothstep(ratio)
+        return nominal + s * (target - nominal)
+
+    def _target_body_xy_for_window(
+        self,
+        nominal_body_xy: Array,
+        locked_foot_positions: dict[str, Array],
+        windows: list[SwingWindow],
+        stance_feet_for_swing: dict[str, tuple[str, ...]],
+        active_window_id: int | None,
+        next_window_id: int,
+    ) -> Array:
+        if active_window_id is not None:
+            support_feet = stance_feet_for_swing[windows[active_window_id].foot]
+        elif next_window_id < len(windows):
+            support_feet = stance_feet_for_swing[windows[next_window_id].foot]
+        else:
+            support_feet = self.foot_geoms
+
+        support_points_xy = np.vstack([locked_foot_positions[foot][0:2] for foot in support_feet])
+        return body_reference_from_support(
+            nominal_body_xy,
+            support_points_xy,
+            centroid_ratio=self.support_centroid_ratio,
+        )
+
+
 class CrawlGaitPlanner:
     """Generate quasi-static crawl references for the MPC/WBC stack.
 
@@ -63,6 +194,11 @@ class CrawlGaitPlanner:
         self.config = config or CrawlGaitConfig()
         self._validate_config()
         self.windows = self._build_windows()
+        self.body_reference_planner = BodyReferencePlanner(
+            self.config.foot_geoms,
+            self.config.support_centroid_ratio,
+            self.config.pre_shift_time,
+        )
 
     def swing_windows(self) -> list[tuple[str, float, float]]:
         return [window.as_tuple() for window in self.windows]
@@ -95,6 +231,12 @@ class CrawlGaitPlanner:
         if swing_foot is None:
             return self.config.foot_geoms
         return tuple(foot for foot in self.config.foot_geoms if foot != swing_foot)
+
+    def stance_feet_map(self) -> dict[str, tuple[str, ...]]:
+        return {foot: self.stance_feet_for_swing(foot) for foot in self.config.foot_geoms}
+
+    def rolling_foothold_planner(self, initial_foot_positions: dict[str, Array]) -> RollingFootholdPlanner:
+        return RollingFootholdPlanner(self.config.foot_geoms, initial_foot_positions, self.step_delta())
 
     def target_footholds(self, initial_foot_positions: dict[str, Array]) -> dict[str, Array]:
         delta = self.step_delta()
@@ -147,29 +289,15 @@ class CrawlGaitPlanner:
         active_window_id: int | None,
         next_window_id: int,
     ) -> Array:
-        nominal = np.asarray(nominal_body_xy, dtype=float)
-        target = self._target_body_xy_for_window(nominal, locked_foot_positions, active_window_id, next_window_id)
-
-        if active_window_id is not None:
-            return target
-        if next_window_id >= len(self.windows):
-            all_support_points_xy = np.vstack([locked_foot_positions[foot][0:2] for foot in self.config.foot_geoms])
-            return body_reference_from_support(
-                nominal,
-                all_support_points_xy,
-                centroid_ratio=self.config.support_centroid_ratio,
-            )
-
-        next_window = self.windows[next_window_id]
-        shift_start = next_window.start_time - self.config.pre_shift_time
-        if time_s < shift_start:
-            return nominal.copy()
-        if time_s >= next_window.start_time:
-            return target
-
-        ratio = (time_s - shift_start) / self.config.pre_shift_time
-        s, _, _ = smoothstep(ratio)
-        return nominal + s * (target - nominal)
+        return self.body_reference_planner.reference_xy(
+            nominal_body_xy,
+            locked_foot_positions,
+            self.windows,
+            self.stance_feet_map(),
+            time_s,
+            active_window_id,
+            next_window_id,
+        )
 
     def swing_reference(
         self,
@@ -186,28 +314,6 @@ class CrawlGaitPlanner:
             start_time=start_time,
             duration=duration,
             time_s=time_s,
-        )
-
-    def _target_body_xy_for_window(
-        self,
-        nominal_body_xy: Array,
-        locked_foot_positions: dict[str, Array],
-        active_window_id: int | None,
-        next_window_id: int,
-    ) -> Array:
-        if active_window_id is not None:
-            swing_foot = self.windows[active_window_id].foot
-        elif next_window_id < len(self.windows):
-            swing_foot = self.windows[next_window_id].foot
-        else:
-            return np.asarray(nominal_body_xy, dtype=float).copy()
-
-        stance_feet = self.stance_feet_for_swing(swing_foot)
-        support_points_xy = np.vstack([locked_foot_positions[foot][0:2] for foot in stance_feet])
-        return body_reference_from_support(
-            nominal_body_xy,
-            support_points_xy,
-            centroid_ratio=self.config.support_centroid_ratio,
         )
 
     def _build_windows(self) -> list[SwingWindow]:

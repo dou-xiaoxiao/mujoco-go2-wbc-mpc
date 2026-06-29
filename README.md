@@ -353,6 +353,14 @@ Open the continuous forward crawl in the MuJoCo viewer:
 .\.venv\Scripts\python.exe .\scripts\run_srb_mpc_crawl_continuous_viewer.py
 ```
 
+The continuous crawl uses the first split planning stack:
+
+```text
+CrawlGaitPlanner        -> swing windows and contact schedule
+RollingFootholdPlanner  -> rolling foot targets and locked stance positions
+BodyReferencePlanner    -> conservative support-centroid body reference
+```
+
 Solve one three-stance plus FL-swing WBC QP:
 
 ```powershell

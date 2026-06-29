@@ -41,7 +41,6 @@ from mujoco_wbc import (  # noqa: E402
     SingleLegSwingWBCQP,
     StanceWBCConfig,
     StanceWBCQP,
-    swing_foothold_reference,
 )
 
 
@@ -102,9 +101,7 @@ def main() -> None:
     completed_windows: set[int] = set()
     active_window_id: int | None = None
     next_window_id = 0
-    locked_foot_positions = {foot: pos.copy() for foot, pos in initial_foot_positions.items()}
-    swing_initial_positions: dict[int, np.ndarray] = {}
-    target_footholds: dict[int, np.ndarray] = {}
+    foothold_planner = planner.rolling_foothold_planner(initial_foot_positions)
     touchdown_times: dict[int, float] = {}
     next_mpc_update = 0.0
     next_log_time = 0.0
@@ -122,8 +119,7 @@ def main() -> None:
             if active_window_id is None and planner.should_start_window(sim_time, next_window_id):
                 active_window_id = next_window_id
                 foot = swing_windows[active_window_id][0]
-                swing_initial_positions[active_window_id] = locked_foot_positions[foot].copy()
-                target_footholds[active_window_id] = swing_initial_positions[active_window_id] + STEP_DELTA
+                foothold_planner.start_swing(active_window_id, foot)
 
             current_window = planner.window_by_id(active_window_id)
             active_foot = current_window[1] if current_window is not None else None
@@ -132,11 +128,11 @@ def main() -> None:
                 window_id, foot, start_time, swing_duration = current_window
                 foot_pos = robot.geom_position(foot)
                 swing_is_done = sim_time >= start_time + swing_duration
-                foot_is_near_ground = foot_pos[2] <= target_footholds[window_id][2] + TOUCHDOWN_Z_TOL
+                foot_is_near_ground = foot_pos[2] <= foothold_planner.target_for_window(window_id)[2] + TOUCHDOWN_Z_TOL
                 if swing_is_done and foot_is_near_ground:
                     completed_windows.add(window_id)
                     touchdown_times[window_id] = sim_time
-                    locked_foot_positions[foot] = robot.geom_position(foot)
+                    foothold_planner.touchdown(foot, robot.geom_position(foot))
                     active_window_id = None
                     next_window_id = window_id + 1
                     current_window = None
@@ -144,7 +140,7 @@ def main() -> None:
 
             body_xy_ref = planner.body_xy_reference(
                 nominal_body_xy,
-                locked_foot_positions,
+                foothold_planner.locked_positions,
                 sim_time,
                 active_window_id,
                 next_window_id,
@@ -175,14 +171,13 @@ def main() -> None:
                     robot,
                     qpos_ref,
                     force_ref=mpc_force_ref,
-                    stance_pos_refs=locked_foot_positions,
+                    stance_pos_refs=foothold_planner.locked_positions,
                 )
             else:
                 window_id, foot, start_time, swing_duration = current_window
                 phase_name = f"{foot}-swing"
-                ref = swing_foothold_reference(
-                    initial_position=swing_initial_positions[window_id],
-                    step_delta=STEP_DELTA,
+                ref = foothold_planner.swing_reference(
+                    window_id,
                     swing_height=SWING_HEIGHT,
                     start_time=start_time,
                     duration=swing_duration,
@@ -195,7 +190,7 @@ def main() -> None:
                     ref.velocity,
                     ref.acceleration,
                     force_ref=force_ref_for_stance_feet(mpc_force_ref, foot),
-                    stance_pos_refs={stance_foot: locked_foot_positions[stance_foot] for stance_foot in FOOT_GEOMS if stance_foot != foot},
+                    stance_pos_refs={stance_foot: foothold_planner.locked_positions[stance_foot] for stance_foot in FOOT_GEOMS if stance_foot != foot},
                 )
 
             if solution.status in ("solved", "solved inaccurate") and mpc_status in ("solved", "solved inaccurate"):

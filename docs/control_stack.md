@@ -14,12 +14,12 @@ while the higher-level gait logic is still experimental.
 The first planning-layer interface is intentionally simple:
 
 ```text
-CrawlGaitPlanner
--> swing windows
--> contact_schedule[k, foot]
--> body xy reference
--> target footholds
--> swing foot reference
+LocomotionCommand / CrawlCommand
+-> Gait scheduler
+-> Foothold planner
+-> Body reference planner
+-> Swing trajectory planner
+-> MPC/WBC task references
 ```
 
 It does not solve dynamics. It only generates tasks for SRB-MPC and WBC.
@@ -34,6 +34,25 @@ CrawlCommand(vx, vy, yaw_rate)
 Only `vx` and `vy` are active in the first version. The planner converts the
 command into a conservative per-foot `step_delta` over one gait cycle and then
 generates footholds from that step delta. `yaw_rate` is reserved for turning.
+
+Current planning classes:
+
+```text
+CrawlGaitPlanner
+  Builds swing windows and MPC contact schedules.
+
+RollingFootholdPlanner
+  Maintains locked stance-foot positions.
+  At swing start: target_foothold = locked_foot_position + step_delta.
+  At touchdown: locked_foot_position = measured/current foot position.
+
+BodyReferencePlanner
+  Moves the body xy reference toward the centroid of the next support set.
+
+SwingTrajectoryPlanner
+  Currently implemented by swing_foothold_reference().
+  It uses a smooth horizontal profile and sinusoidal vertical clearance.
+```
 
 ## Coordinate Conventions
 
