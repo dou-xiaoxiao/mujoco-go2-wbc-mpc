@@ -110,12 +110,19 @@ Control stack notes:
 docs/mainline_architecture.md
 docs/control_stack.md
 docs/locomotion_reference_map.md
+docs/external_reference_sources.md
 ```
 
 Quick regression check for the current MPC/WBC interfaces:
 
 ```powershell
 .\.venv\Scripts\python.exe .\scripts\validate_control_stack.py
+```
+
+Inspect which upstream gait/contact references the current WBC can execute:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\inspect_external_reference_modes.py
 ```
 
 Run the continuous crawl in the MuJoCo viewer:

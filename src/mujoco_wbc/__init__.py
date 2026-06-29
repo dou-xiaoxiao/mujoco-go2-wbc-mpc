@@ -27,6 +27,13 @@ from .planning import (
     SwingWindow,
 )
 from .profiling import LoopProfiler, TimingStats
+from .reference_inputs import (
+    LocomotionReferenceFrame,
+    ModeSupportReport,
+    classify_contact_mode,
+    named_contact_patterns,
+    validate_reference_frame,
+)
 from .support_polygon import SupportReference, body_reference_from_support, support_centroid
 from .swing_trajectory import SwingReference, smoothstep, swing_foothold_reference
 from .wbc_qp import (
@@ -57,6 +64,8 @@ __all__ = [
     "ReferenceBundle",
     "RollingFootholdPlanner",
     "LoopProfiler",
+    "LocomotionReferenceFrame",
+    "ModeSupportReport",
     "SingleLegSwingWBCConfig",
     "SingleLegSwingWBCQP",
     "SingleLegSwingWBCSolution",
@@ -68,9 +77,12 @@ __all__ = [
     "TimingStats",
     "SupportReference",
     "body_reference_from_support",
+    "classify_contact_mode",
+    "named_contact_patterns",
     "scheduled_swing_contacts",
     "single_leg_swing_schedule",
     "smoothstep",
     "support_centroid",
     "swing_foothold_reference",
+    "validate_reference_frame",
 ]
