@@ -101,6 +101,7 @@ class StanceWBCQP:
         robot: MuJoCoModelInterface,
         qpos_ref: Array,
         force_ref: Array | None = None,
+        force_zero_weights: Array | None = None,
         stance_pos_refs: dict[str, Array] | None = None,
     ) -> StanceWBCSolution:
         cfg = self.config
@@ -126,6 +127,9 @@ class StanceWBCQP:
         force_ref = self._force_reference(robot, len(cfg.foot_geoms)) if force_ref is None else np.asarray(force_ref, dtype=float)
         if force_ref.shape != (nf,):
             raise ValueError(f"force_ref must have shape ({nf},), got {force_ref.shape}")
+        force_zero_weights = np.zeros(nf) if force_zero_weights is None else np.asarray(force_zero_weights, dtype=float)
+        if force_zero_weights.shape != (nf,):
+            raise ValueError(f"force_zero_weights must have shape ({nf},), got {force_zero_weights.shape}")
 
         p_diag = np.zeros(nvar)
         q = np.zeros(nvar)
@@ -135,7 +139,7 @@ class StanceWBCQP:
         self._add_diagonal_tracking_cost(p_diag, q, slice(6, nv), cfg.weight_joint_posture, joint_acc_cmd)
 
         p_diag[idx_tau] += cfg.weight_tau
-        p_diag[idx_force] += cfg.weight_force
+        p_diag[idx_force] += cfg.weight_force + force_zero_weights
         q[idx_force] += -cfg.weight_force * force_ref
 
         p = sparse.diags(p_diag + 1.0e-9, format="csc")
@@ -212,7 +216,7 @@ class StanceWBCQP:
             self._problem_shape = shape
         else:
             try:
-                self._solver.update(q=q, l=l, u=u, Ax=a.data)
+                self._solver.update(q=q, l=l, u=u, Px=p.data, Ax=a.data)
             except ValueError:
                 self._solver = osqp.OSQP()
                 self._solver.setup(
@@ -365,6 +369,7 @@ class SingleLegSwingWBCQP:
         swing_vel_ref: Array | None = None,
         swing_acc_ref: Array | None = None,
         force_ref: Array | None = None,
+        force_zero_weights: Array | None = None,
         stance_pos_refs: dict[str, Array] | None = None,
     ) -> SingleLegSwingWBCSolution:
         cfg = self.config
@@ -397,6 +402,9 @@ class SingleLegSwingWBCQP:
         )
         if force_ref.shape != (nf,):
             raise ValueError(f"force_ref must have shape ({nf},), got {force_ref.shape}")
+        force_zero_weights = np.zeros(nf) if force_zero_weights is None else np.asarray(force_zero_weights, dtype=float)
+        if force_zero_weights.shape != (nf,):
+            raise ValueError(f"force_zero_weights must have shape ({nf},), got {force_zero_weights.shape}")
 
         swing_j = robot.geom_jacobian(cfg.swing_foot_geom).jacp
         swing_jdot_v = robot.geom_jdot_v(cfg.swing_foot_geom)
@@ -417,7 +425,10 @@ class SingleLegSwingWBCQP:
         self._add_diagonal_tracking_cost(p, q, slice(6, nv), cfg.weight_joint_posture, joint_acc_cmd)
 
         p[idx_tau, idx_tau] = p[idx_tau, idx_tau] + sparse.eye(nu, format="lil") * cfg.weight_tau
-        p[idx_force, idx_force] = p[idx_force, idx_force] + sparse.eye(nf, format="lil") * cfg.weight_force
+        p[idx_force, idx_force] = p[idx_force, idx_force] + sparse.diags(
+            cfg.weight_force + force_zero_weights,
+            format="lil",
+        )
         q[idx_force] += -cfg.weight_force * force_ref
 
         swing_hessian = cfg.weight_swing_foot * (swing_j.T @ swing_j)

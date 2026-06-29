@@ -31,6 +31,7 @@ TOUCHDOWN_Z_TOL = 0.014
 TOUCHDOWN_XY_TOL = 0.025
 TOUCHDOWN_MIN_PHASE = 0.80
 LANDING_FORCE_RAMP_TIME = 0.15
+LANDING_FORCE_ZERO_WEIGHT = 40.0
 MPC_NORMAL_FORCE_MIN = 5.0
 MPC_UPDATE_DT = 0.06
 WBC_UPDATE_DT = 0.01
@@ -225,11 +226,13 @@ def main() -> None:
             if sim_time >= next_wbc_update:
                 with profiler.time("wbc"):
                     ramped_force_ref = landing_ramped_force_ref(mpc_force_ref, sim_time, touchdown_times_by_foot)
+                    landing_zero_weights = landing_force_zero_weights(sim_time, touchdown_times_by_foot)
                     if current_window is None:
                         solution = stance_controller.solve(
                             robot,
                             qpos_ref,
                             force_ref=ramped_force_ref,
+                            force_zero_weights=landing_zero_weights,
                             stance_pos_refs=foothold_planner.locked_positions,
                         )
                     else:
@@ -248,6 +251,7 @@ def main() -> None:
                             ref.velocity,
                             ref.acceleration,
                             force_ref=force_ref_for_stance_feet(ramped_force_ref, foot),
+                            force_zero_weights=force_ref_for_stance_feet(landing_zero_weights, foot),
                             stance_pos_refs={stance_foot: foothold_planner.locked_positions[stance_foot] for stance_foot in FOOT_GEOMS if stance_foot != foot},
                         )
 
@@ -329,6 +333,24 @@ def landing_ramped_force_ref(
         ramp = ratio * ratio * (3.0 - 2.0 * ratio)
         forces[foot_id] *= ramp
     return forces.reshape(-1)
+
+
+def landing_force_zero_weights(
+    time_s: float,
+    touchdown_times_by_foot: dict[str, float],
+) -> np.ndarray:
+    weights = np.zeros((len(FOOT_GEOMS), 3), dtype=float)
+    for foot_id, foot in enumerate(FOOT_GEOMS):
+        touchdown_time = touchdown_times_by_foot.get(foot)
+        if touchdown_time is None:
+            continue
+        elapsed = time_s - touchdown_time
+        if elapsed >= LANDING_FORCE_RAMP_TIME:
+            continue
+        ratio = max(elapsed / LANDING_FORCE_RAMP_TIME, 0.0)
+        release = ratio * ratio * (3.0 - 2.0 * ratio)
+        weights[foot_id, :] = LANDING_FORCE_ZERO_WEIGHT * (1.0 - release)
+    return weights.reshape(-1)
 
 
 if __name__ == "__main__":
