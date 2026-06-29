@@ -285,6 +285,12 @@ Inspect the per-knot contact schedule used by SRB-MPC:
 .\.venv\Scripts\python.exe .\scripts\inspect_contact_schedule.py
 ```
 
+Inspect the first quasi-static crawl task planner:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\inspect_crawl_planner.py
+```
+
 The SRB-MPC forward-step examples build `contact_schedule[k, foot]` from future
 knot times:
 

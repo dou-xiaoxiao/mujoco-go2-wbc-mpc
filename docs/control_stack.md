@@ -9,6 +9,22 @@ contact/gait schedule -> centroidal SRB-MPC -> full-body WBC QP -> MuJoCo torque
 The purpose of this document is to keep the stable control interfaces clear
 while the higher-level gait logic is still experimental.
 
+## Planning Layer
+
+The first planning-layer interface is intentionally simple:
+
+```text
+CrawlGaitPlanner
+-> swing windows
+-> contact_schedule[k, foot]
+-> body xy reference
+-> target footholds
+-> swing foot reference
+```
+
+It does not solve dynamics. It only generates tasks for SRB-MPC and WBC.
+The lower layers still own force optimization and torque generation.
+
 ## Coordinate Conventions
 
 The MuJoCo model is a floating-base Go2:

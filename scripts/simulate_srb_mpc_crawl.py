@@ -27,25 +27,20 @@ TOUCHDOWN_Z_TOL = 0.018
 MPC_NORMAL_FORCE_MIN = 5.0
 MPC_UPDATE_DT = 0.03
 PRE_SHIFT_TIME = 0.6
-BODY_SHIFT_BY_SWING_FOOT = {
-    "FL": np.array([0.0, 0.0]),
-    "RR": np.array([0.0, 0.0]),
-    "FR": np.array([0.0, 0.0]),
-    "RL": np.array([0.0, 0.0]),
-}
+SUPPORT_CENTROID_RATIO = 0.85
 
 sys.path.insert(0, str(SRC_ROOT))
 
 from mujoco_wbc import (  # noqa: E402
     CentroidalMPC,
     CentroidalMPCConfig,
+    CrawlGaitConfig,
+    CrawlGaitPlanner,
     MuJoCoModelInterface,
     SingleLegSwingWBCConfig,
     SingleLegSwingWBCQP,
     StanceWBCConfig,
     StanceWBCQP,
-    scheduled_swing_contacts,
-    swing_foothold_reference,
 )
 
 
@@ -54,9 +49,23 @@ def main() -> None:
     robot.set_keyframe("home")
     home_qpos_ref = robot.q
     home_com_ref = robot.center_of_mass()
+    nominal_body_xy = home_qpos_ref[0:2].copy()
     initial_foot_positions = {foot: robot.geom_position(foot) for foot in FOOT_GEOMS}
-    target_footholds = {foot: initial_foot_positions[foot] + STEP_DELTA for foot in FOOT_GEOMS}
-    swing_windows = build_swing_windows()
+    planner = CrawlGaitPlanner(
+        CrawlGaitConfig(
+            foot_geoms=FOOT_GEOMS,
+            sequence=CRAWL_SEQUENCE,
+            first_swing_start=SWING_START,
+            swing_duration=SWING_DURATION,
+            swing_gap=SWING_GAP,
+            swing_height=SWING_HEIGHT,
+            step_delta=STEP_DELTA,
+            pre_shift_time=PRE_SHIFT_TIME,
+            support_centroid_ratio=SUPPORT_CENTROID_RATIO,
+        )
+    )
+    target_footholds = planner.target_footholds(initial_foot_positions)
+    swing_windows = planner.swing_windows()
 
     mpc_config = CentroidalMPCConfig(
         contact_geoms=FOOT_GEOMS,
@@ -114,12 +123,10 @@ def main() -> None:
 
     for _ in range(steps):
         sim_time = float(robot.data.time)
-        if active_window_id is None and next_window_id < len(swing_windows):
-            _, start_time, _ = swing_windows[next_window_id]
-            if sim_time >= start_time:
-                active_window_id = next_window_id
+        if active_window_id is None and planner.should_start_window(sim_time, next_window_id):
+            active_window_id = next_window_id
 
-        current_window = window_by_id(swing_windows, active_window_id)
+        current_window = planner.window_by_id(active_window_id)
         active_foot = current_window[1] if current_window is not None else None
 
         if current_window is not None:
@@ -137,19 +144,21 @@ def main() -> None:
                 active_foot = None
 
         if sim_time >= next_mpc_update:
-            visible_windows = swing_windows if active_window_id is None else swing_windows[: active_window_id + 1]
-            schedule = scheduled_swing_contacts(
-                FOOT_GEOMS,
-                visible_windows,
+            schedule = planner.contact_schedule(
                 current_time=sim_time,
                 horizon_steps=mpc_config.horizon_steps,
                 dt=mpc_config.dt,
                 completed_windows=completed_windows,
+                active_window_id=active_window_id,
             )
-            if active_window_id is not None:
-                active_foot_idx = FOOT_GEOMS.index(swing_windows[active_window_id][0])
-                schedule[:, active_foot_idx] = False
-            support_shift = body_shift_xy_for_time(sim_time, swing_windows, active_window_id, next_window_id)
+            body_xy_ref = planner.body_xy_reference(
+                nominal_body_xy,
+                locked_foot_positions,
+                sim_time,
+                active_window_id,
+                next_window_id,
+            )
+            support_shift = body_xy_ref - nominal_body_xy
             com_ref = home_com_ref.copy()
             com_ref[0:2] += support_shift
             mpc_solution = mpc.solve(robot, com_ref, contact_schedule=schedule)
@@ -161,7 +170,13 @@ def main() -> None:
             next_mpc_update += MPC_UPDATE_DT
 
         qpos_ref = home_qpos_ref.copy()
-        qpos_ref[0:2] += body_shift_xy_for_time(sim_time, swing_windows, active_window_id, next_window_id)
+        qpos_ref[0:2] = planner.body_xy_reference(
+            nominal_body_xy,
+            locked_foot_positions,
+            sim_time,
+            active_window_id,
+            next_window_id,
+        )
 
         if current_window is None:
             solution = stance_controller.solve(
@@ -174,10 +189,9 @@ def main() -> None:
         else:
             _, foot, start_time, swing_duration = current_window
             stance_feet = tuple(other for other in FOOT_GEOMS if other != foot)
-            ref = swing_foothold_reference(
-                initial_position=initial_foot_positions[foot],
-                step_delta=STEP_DELTA,
-                swing_height=SWING_HEIGHT,
+            ref = planner.swing_reference(
+                foot,
+                initial_foot_positions,
                 start_time=start_time,
                 duration=swing_duration,
                 time_s=sim_time,
@@ -238,43 +252,6 @@ def main() -> None:
     print(f"max stance residual   = {max_stance_residual:.3e}")
     print(f"max MPC residual      = {max_mpc_residual:.3e}")
     print(f"failed statuses       = {failed_statuses}")
-
-
-def build_swing_windows() -> list[tuple[str, float, float]]:
-    windows = []
-    for idx, foot in enumerate(CRAWL_SEQUENCE):
-        start = SWING_START + idx * (SWING_DURATION + SWING_GAP)
-        windows.append((foot, start, SWING_DURATION))
-    return windows
-
-
-def window_by_id(windows: list[tuple[str, float, float]], window_id: int | None) -> tuple[int, str, float, float] | None:
-    if window_id is None:
-        return None
-    foot, start_time, duration = windows[window_id]
-    return window_id, foot, start_time, duration
-
-
-def body_shift_xy_for_time(
-    time_s: float,
-    windows: list[tuple[str, float, float]],
-    active_window_id: int | None,
-    next_window_id: int,
-) -> np.ndarray:
-    if active_window_id is not None:
-        return BODY_SHIFT_BY_SWING_FOOT[windows[active_window_id][0]]
-    if next_window_id >= len(windows):
-        return np.zeros(2)
-
-    foot, start_time, _ = windows[next_window_id]
-    if time_s < start_time - PRE_SHIFT_TIME:
-        return np.zeros(2)
-    if time_s >= start_time:
-        return BODY_SHIFT_BY_SWING_FOOT[foot]
-
-    ratio = (time_s - (start_time - PRE_SHIFT_TIME)) / PRE_SHIFT_TIME
-    s = 3.0 * ratio * ratio - 2.0 * ratio * ratio * ratio
-    return s * BODY_SHIFT_BY_SWING_FOOT[foot]
 
 
 def force_ref_for_stance_feet(force_ref_all: np.ndarray, swing_foot: str) -> np.ndarray:
