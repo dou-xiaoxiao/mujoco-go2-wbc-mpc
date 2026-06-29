@@ -33,6 +33,7 @@ TOUCHDOWN_MIN_PHASE = 0.80
 SOFT_LANDING_START_PHASE = 0.95
 SOFT_LANDING_MAX_DESCENT_RATE = 0.25
 SOFT_LANDING_STOPPING_ACCEL = 1.0
+LANDING_FORCE_RAMP_TIME = 0.15
 MPC_NORMAL_FORCE_MIN = 5.0
 MPC_UPDATE_DT = 0.06
 WBC_UPDATE_DT = 0.01
@@ -120,6 +121,7 @@ def main() -> None:
     next_window_id = 0
     foothold_planner = planner.rolling_foothold_planner(initial_foot_positions)
     touchdown_times: dict[int, float] = {}
+    touchdown_times_by_foot: dict[str, float] = {}
     next_mpc_update = 0.0
     next_wbc_update = 0.0
     next_viewer_sync = 0.0
@@ -176,6 +178,7 @@ def main() -> None:
                     if touchdown_allowed and foot_is_near_ground and foot_is_near_target_xy and touchdown_detected:
                         completed_windows.add(window_id)
                         touchdown_times[window_id] = sim_time
+                        touchdown_times_by_foot[foot] = sim_time
                         foothold_planner.touchdown(foot, robot.geom_position(foot))
                         active_window_id = None
                         next_window_id = window_id + 1
@@ -224,11 +227,12 @@ def main() -> None:
 
             if sim_time >= next_wbc_update:
                 with profiler.time("wbc"):
+                    ramped_force_ref = landing_ramped_force_ref(mpc_force_ref, sim_time, touchdown_times_by_foot)
                     if current_window is None:
                         solution = stance_controller.solve(
                             robot,
                             qpos_ref,
-                            force_ref=mpc_force_ref,
+                            force_ref=ramped_force_ref,
                             stance_pos_refs=foothold_planner.locked_positions,
                         )
                     else:
@@ -256,7 +260,7 @@ def main() -> None:
                             swing_pos_ref,
                             swing_vel_ref,
                             swing_acc_ref,
-                            force_ref=force_ref_for_stance_feet(mpc_force_ref, foot),
+                            force_ref=force_ref_for_stance_feet(ramped_force_ref, foot),
                             stance_pos_refs={stance_foot: foothold_planner.locked_positions[stance_foot] for stance_foot in FOOT_GEOMS if stance_foot != foot},
                         )
 
@@ -319,6 +323,25 @@ def main() -> None:
 def force_ref_for_stance_feet(force_ref_all: np.ndarray, swing_foot: str) -> np.ndarray:
     forces = force_ref_all.reshape(len(FOOT_GEOMS), 3)
     return np.vstack([force for foot, force in zip(FOOT_GEOMS, forces) if foot != swing_foot]).reshape(-1)
+
+
+def landing_ramped_force_ref(
+    force_ref_all: np.ndarray,
+    time_s: float,
+    touchdown_times_by_foot: dict[str, float],
+) -> np.ndarray:
+    forces = force_ref_all.reshape(len(FOOT_GEOMS), 3).copy()
+    for foot_id, foot in enumerate(FOOT_GEOMS):
+        touchdown_time = touchdown_times_by_foot.get(foot)
+        if touchdown_time is None:
+            continue
+        elapsed = time_s - touchdown_time
+        if elapsed >= LANDING_FORCE_RAMP_TIME:
+            continue
+        ratio = max(elapsed / LANDING_FORCE_RAMP_TIME, 0.0)
+        ramp = ratio * ratio * (3.0 - 2.0 * ratio)
+        forces[foot_id] *= ramp
+    return forces.reshape(-1)
 
 
 def soft_landing_reference(
