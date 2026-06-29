@@ -341,6 +341,18 @@ Open the commanded forward crawl in the MuJoCo viewer:
 .\.venv\Scripts\python.exe .\scripts\run_srb_mpc_crawl_forward_viewer.py
 ```
 
+Run a short multi-cycle continuous forward crawl:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\simulate_srb_mpc_crawl_continuous.py
+```
+
+Open the continuous forward crawl in the MuJoCo viewer:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\run_srb_mpc_crawl_continuous_viewer.py
+```
+
 Solve one three-stance plus FL-swing WBC QP:
 
 ```powershell
