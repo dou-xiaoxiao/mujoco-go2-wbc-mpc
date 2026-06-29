@@ -21,6 +21,7 @@ from .conventions import BASE_BODY_NAME
 
 
 Array = np.ndarray
+FOOT_GEOM_NAMES = ("FL", "FR", "RL", "RR")
 
 
 @dataclass(frozen=True)
@@ -208,8 +209,24 @@ class MuJoCoModelInterface:
         mujoco.mj_jacSite(self.model, self.data, jacp, jacr, site_id)
         return FrameJacobian(jacp=jacp, jacr=jacr)
 
-    def geom_position(self, geom_name: str) -> Array:
+    def geom_center_position(self, geom_name: str) -> Array:
         return self.data.geom_xpos[self._geom_id(geom_name)].copy()
+
+    def geom_position(self, geom_name: str) -> Array:
+        """Return the control point used for a geom.
+
+        For Go2 foot collision spheres, the control point is the sphere's
+        bottom point along world z, not the sphere center. This matches the
+        touchdown/stance point more closely than the raw collision center.
+        Other geoms return their MuJoCo center position.
+        """
+
+        geom_id = self._geom_id(geom_name)
+        center = self.data.geom_xpos[geom_id].copy()
+        if self._uses_foot_contact_point(geom_name, geom_id):
+            radius = float(self.model.geom_size[geom_id, 0])
+            return center - np.array([0.0, 0.0, radius], dtype=float)
+        return center
 
     def geom_has_contact(self, geom_name: str) -> bool:
         """Return True when the named geom is in any active MuJoCo contact."""
@@ -220,6 +237,12 @@ class MuJoCoModelInterface:
             if contact.geom1 == geom_id or contact.geom2 == geom_id:
                 return True
         return False
+
+    def geom_contact_radius(self, geom_name: str) -> float:
+        geom_id = self._geom_id(geom_name)
+        if not self._uses_foot_contact_point(geom_name, geom_id):
+            return 0.0
+        return float(self.model.geom_size[geom_id, 0])
 
     def geom_position_in_base(self, geom_name: str) -> Array:
         return self.world_point_to_base(self.geom_position(geom_name))
@@ -298,6 +321,13 @@ class MuJoCoModelInterface:
         if geom_id < 0:
             raise ValueError(f"Unknown geom: {name}")
         return geom_id
+
+    def _uses_foot_contact_point(self, geom_name: str, geom_id: int) -> bool:
+        return (
+            geom_name in FOOT_GEOM_NAMES
+            and self.model.geom_type[geom_id] == mujoco.mjtGeom.mjGEOM_SPHERE
+            and self.model.geom_size[geom_id, 0] > 0.0
+        )
 
     def _site_id(self, name: str) -> int:
         site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, name)
