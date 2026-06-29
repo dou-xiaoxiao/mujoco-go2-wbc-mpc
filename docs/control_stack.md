@@ -49,10 +49,26 @@ RollingFootholdPlanner
 BodyReferencePlanner
   Moves the body xy reference toward the centroid of the next support set.
 
+ReferenceBundle
+  Makes the reference split explicit:
+    base_position_ref    -> WBC base task
+    base_orientation_ref -> WBC base task
+    com_position_ref     -> SRB-MPC
+    com_velocity_ref     -> SRB-MPC
+
 SwingTrajectoryPlanner
   Currently implemented by swing_foothold_reference().
   It uses a smooth horizontal profile and sinusoidal vertical clearance.
 ```
+
+The first implementation still uses a simple approximation:
+
+```text
+com_position_ref_xy = home_com_xy + (base_position_ref_xy - nominal_base_xy)
+```
+
+This keeps the old behavior but makes the data ownership explicit: WBC tracks
+base references, while SRB-MPC tracks COM references.
 
 ## Coordinate Conventions
 

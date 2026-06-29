@@ -359,6 +359,7 @@ The continuous crawl uses the first split planning stack:
 CrawlGaitPlanner        -> swing windows and contact schedule
 RollingFootholdPlanner  -> rolling foot targets and locked stance positions
 BodyReferencePlanner    -> conservative support-centroid body reference
+ReferenceBundle         -> explicit base refs for WBC and COM refs for MPC
 ```
 
 Solve one three-stance plus FL-swing WBC QP:

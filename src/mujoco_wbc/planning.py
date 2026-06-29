@@ -58,6 +58,14 @@ class FootholdPlan:
     target_position: Array
 
 
+@dataclass(frozen=True)
+class ReferenceBundle:
+    base_position_ref: Array
+    base_orientation_ref: Array
+    com_position_ref: Array
+    com_velocity_ref: Array
+
+
 class RollingFootholdPlanner:
     """Maintain foothold targets for repeated stepping.
 
@@ -297,6 +305,38 @@ class CrawlGaitPlanner:
             time_s,
             active_window_id,
             next_window_id,
+        )
+
+    def reference_bundle(
+        self,
+        home_qpos_ref: Array,
+        home_com_ref: Array,
+        nominal_body_xy: Array,
+        locked_foot_positions: dict[str, Array],
+        time_s: float,
+        active_window_id: int | None,
+        next_window_id: int,
+    ) -> ReferenceBundle:
+        body_xy_ref = self.body_xy_reference(
+            nominal_body_xy,
+            locked_foot_positions,
+            time_s,
+            active_window_id,
+            next_window_id,
+        )
+
+        base_position_ref = np.asarray(home_qpos_ref[0:3], dtype=float).copy()
+        base_position_ref[0:2] = body_xy_ref
+        base_orientation_ref = np.asarray(home_qpos_ref[3:7], dtype=float).copy()
+
+        com_position_ref = np.asarray(home_com_ref, dtype=float).copy()
+        com_position_ref[0:2] += body_xy_ref - np.asarray(nominal_body_xy, dtype=float)
+
+        return ReferenceBundle(
+            base_position_ref=base_position_ref,
+            base_orientation_ref=base_orientation_ref,
+            com_position_ref=com_position_ref,
+            com_velocity_ref=np.zeros(3, dtype=float),
         )
 
     def swing_reference(

@@ -22,6 +22,7 @@ from .planning import (
     CrawlGaitConfig,
     CrawlGaitPlanner,
     FootholdPlan,
+    ReferenceBundle,
     RollingFootholdPlanner,
     SwingWindow,
 )
@@ -52,6 +53,7 @@ __all__ = [
     "CrawlGaitPlanner",
     "BodyReferencePlanner",
     "FootholdPlan",
+    "ReferenceBundle",
     "RollingFootholdPlanner",
     "SingleLegSwingWBCConfig",
     "SingleLegSwingWBCQP",

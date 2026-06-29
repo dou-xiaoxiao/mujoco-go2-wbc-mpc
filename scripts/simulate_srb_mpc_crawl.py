@@ -151,17 +151,21 @@ def main() -> None:
                 completed_windows=completed_windows,
                 active_window_id=active_window_id,
             )
-            body_xy_ref = planner.body_xy_reference(
+            refs = planner.reference_bundle(
+                home_qpos_ref,
+                home_com_ref,
                 nominal_body_xy,
                 locked_foot_positions,
                 sim_time,
                 active_window_id,
                 next_window_id,
             )
-            support_shift = body_xy_ref - nominal_body_xy
-            com_ref = home_com_ref.copy()
-            com_ref[0:2] += support_shift
-            mpc_solution = mpc.solve(robot, com_ref, contact_schedule=schedule)
+            mpc_solution = mpc.solve(
+                robot,
+                refs.com_position_ref,
+                com_velocity_ref=refs.com_velocity_ref,
+                contact_schedule=schedule,
+            )
             mpc_force_ref = mpc_solution.first_contact_forces
             mpc_status = mpc_solution.status
             mpc_residual = float(np.linalg.norm(mpc_solution.dynamics_residual))
@@ -170,13 +174,17 @@ def main() -> None:
             next_mpc_update += MPC_UPDATE_DT
 
         qpos_ref = home_qpos_ref.copy()
-        qpos_ref[0:2] = planner.body_xy_reference(
+        refs = planner.reference_bundle(
+            home_qpos_ref,
+            home_com_ref,
             nominal_body_xy,
             locked_foot_positions,
             sim_time,
             active_window_id,
             next_window_id,
         )
+        qpos_ref[0:3] = refs.base_position_ref
+        qpos_ref[3:7] = refs.base_orientation_ref
 
         if current_window is None:
             solution = stance_controller.solve(
