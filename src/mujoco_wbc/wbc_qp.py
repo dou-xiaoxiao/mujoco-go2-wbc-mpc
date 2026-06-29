@@ -353,6 +353,9 @@ class SingleLegSwingWBCQP:
 
     def __init__(self, config: SingleLegSwingWBCConfig | None = None):
         self.config = config or SingleLegSwingWBCConfig()
+        self._solver: osqp.OSQP | None = None
+        self._problem_shape: tuple[int, int, int, int] | None = None
+        self._last_solution: Array | None = None
 
     def solve(
         self,
@@ -421,7 +424,7 @@ class SingleLegSwingWBCQP:
         p[idx_vdot, idx_vdot] = p[idx_vdot, idx_vdot] + sparse.csc_matrix(swing_hessian)
         q[idx_vdot] += -cfg.weight_swing_foot * swing_j.T @ swing_target
 
-        p = (p + sparse.eye(nvar, format="lil") * 1.0e-9).tocsc()
+        p = sparse.triu(p + sparse.eye(nvar, format="lil") * 1.0e-9, format="csc")
 
         aeq_dyn = sparse.hstack(
             [sparse.csc_matrix(mass), sparse.csc_matrix(-bmat), sparse.csc_matrix(-jc.T)],
@@ -452,9 +455,7 @@ class SingleLegSwingWBCQP:
         l = np.concatenate([beq_dyn, beq_stance, l_friction, l_tau])
         u = np.concatenate([beq_dyn, beq_stance, u_friction, u_tau])
 
-        solver = osqp.OSQP()
-        solver.setup(P=p, q=q, A=a, l=l, u=u, verbose=False, polish=True, eps_abs=1.0e-6, eps_rel=1.0e-6)
-        result = solver.solve()
+        result = self._solve_osqp(p, q, a, l, u)
 
         z = np.zeros(nvar) if result.x is None else result.x
         vdot = z[idx_vdot]
@@ -474,6 +475,56 @@ class SingleLegSwingWBCQP:
             objective=float(result.info.obj_val),
             swing_accel_error=swing_accel_error,
         )
+
+    def _solve_osqp(
+        self,
+        p: sparse.csc_matrix,
+        q: Array,
+        a: sparse.csc_matrix,
+        l: Array,
+        u: Array,
+    ) -> Any:
+        shape = (p.shape[0], a.shape[0], p.nnz, a.nnz)
+        if self._solver is None or self._problem_shape != shape:
+            self._solver = osqp.OSQP()
+            self._solver.setup(
+                P=p,
+                q=q,
+                A=a,
+                l=l,
+                u=u,
+                verbose=False,
+                polish=True,
+                warm_starting=True,
+                eps_abs=1.0e-6,
+                eps_rel=1.0e-6,
+            )
+            self._problem_shape = shape
+        else:
+            try:
+                self._solver.update(q=q, l=l, u=u, Px=p.data, Ax=a.data)
+            except ValueError:
+                self._solver = osqp.OSQP()
+                self._solver.setup(
+                    P=p,
+                    q=q,
+                    A=a,
+                    l=l,
+                    u=u,
+                    verbose=False,
+                    polish=True,
+                    warm_starting=True,
+                    eps_abs=1.0e-6,
+                    eps_rel=1.0e-6,
+                )
+                self._problem_shape = shape
+
+        if self._last_solution is not None and self._last_solution.shape == q.shape:
+            self._solver.warm_start(x=self._last_solution)
+        result = self._solver.solve()
+        if result.x is not None:
+            self._last_solution = result.x.copy()
+        return result
 
     def _base_position_accel_cmd(self, robot: MuJoCoModelInterface, qpos_ref: Array) -> Array:
         cfg = self.config

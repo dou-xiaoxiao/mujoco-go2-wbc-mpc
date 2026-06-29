@@ -147,11 +147,15 @@ QP solver reuse status:
 ```text
 CentroidalMPC:  first call OSQP setup, later calls update q/l/u/Ax and warm start
 StanceWBCQP:    first call OSQP setup, later calls update q/l/u/Ax and warm start
-SwingWBCQP:     still rebuilds the QP each solve, because its Hessian contains J_sw^T J_sw
+SwingWBCQP:     first call OSQP setup, later calls update P/q/l/u/Ax and warm start
 ```
 
-The swing WBC can be optimized later by explicitly fixing the Hessian sparsity
-pattern and updating the upper-triangular `P` values.
+In QP form, `P` is the Hessian of the quadratic objective, not just a raw
+weight. For example, a swing tracking term `w ||J_sw vdot - target||^2`
+contributes `w J_sw^T J_sw` to `P` and `-w J_sw^T target` to `q`.
+
+The remaining WBC speed bottleneck is now mostly matrix/Jacobian construction
+before the OSQP call, not only solver setup.
 
 ## Go2 Dynamics Milestone
 
