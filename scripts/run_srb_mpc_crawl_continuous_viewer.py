@@ -28,9 +28,12 @@ COMMAND_YAW_RATE = 0.0
 MAX_STEP_LENGTH = 0.035
 COMMAND_VELOCITY_REF_SCALE = 1.0
 TOUCHDOWN_Z_TOL = 0.02
+TOUCHDOWN_XY_TOL = 0.025
+TOUCHDOWN_MIN_PHASE = 0.80
 MPC_NORMAL_FORCE_MIN = 5.0
 MPC_UPDATE_DT = 0.06
 WBC_UPDATE_DT = 0.01
+VIEWER_SYNC_DT = 1.0 / 60.0
 PROFILE_LOG_DT = 2.0
 PRE_SHIFT_TIME = 0.6
 SUPPORT_CENTROID_RATIO = 0.85
@@ -116,6 +119,7 @@ def main() -> None:
     touchdown_times: dict[int, float] = {}
     next_mpc_update = 0.0
     next_wbc_update = 0.0
+    next_viewer_sync = 0.0
     next_log_time = 0.0
     next_profile_time = PROFILE_LOG_DT
     mpc_force_ref = np.zeros(3 * len(FOOT_GEOMS))
@@ -158,9 +162,15 @@ def main() -> None:
                 if current_window is not None:
                     window_id, foot, start_time, swing_duration = current_window
                     foot_pos = robot.geom_position(foot)
+                    target_pos = foothold_planner.target_for_window(window_id)
+                    swing_phase = (sim_time - start_time) / swing_duration
                     swing_is_done = sim_time >= start_time + swing_duration
-                    foot_is_near_ground = foot_pos[2] <= foothold_planner.target_for_window(window_id)[2] + TOUCHDOWN_Z_TOL
-                    if swing_is_done and foot_is_near_ground:
+                    foot_is_near_ground = foot_pos[2] <= target_pos[2] + TOUCHDOWN_Z_TOL
+                    foot_is_near_target_xy = np.linalg.norm(foot_pos[0:2] - target_pos[0:2]) <= TOUCHDOWN_XY_TOL
+                    foot_has_contact = robot.geom_has_contact(foot)
+                    touchdown_allowed = swing_phase >= TOUCHDOWN_MIN_PHASE or swing_is_done
+                    touchdown_detected = foot_has_contact or swing_is_done
+                    if touchdown_allowed and foot_is_near_ground and foot_is_near_target_xy and touchdown_detected:
                         completed_windows.add(window_id)
                         touchdown_times[window_id] = sim_time
                         foothold_planner.touchdown(foot, robot.geom_position(foot))
@@ -249,8 +259,10 @@ def main() -> None:
 
             with profiler.time("mj_step"):
                 mujoco.mj_step(robot.model, robot.data)
-            with profiler.time("viewer"):
-                viewer.sync()
+            if robot.data.time >= next_viewer_sync:
+                with profiler.time("viewer"):
+                    viewer.sync()
+                next_viewer_sync += VIEWER_SYNC_DT
 
             if robot.data.time >= next_log_time:
                 print(

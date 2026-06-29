@@ -211,6 +211,16 @@ class MuJoCoModelInterface:
     def geom_position(self, geom_name: str) -> Array:
         return self.data.geom_xpos[self._geom_id(geom_name)].copy()
 
+    def geom_has_contact(self, geom_name: str) -> bool:
+        """Return True when the named geom is in any active MuJoCo contact."""
+
+        geom_id = self._geom_id(geom_name)
+        for contact_id in range(self.data.ncon):
+            contact = self.data.contact[contact_id]
+            if contact.geom1 == geom_id or contact.geom2 == geom_id:
+                return True
+        return False
+
     def geom_position_in_base(self, geom_name: str) -> Array:
         return self.world_point_to_base(self.geom_position(geom_name))
 

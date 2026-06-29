@@ -153,6 +153,7 @@ The viewer loop uses separate update rates:
 ```text
 MuJoCo physics timestep: model.opt.timestep
 WBC_UPDATE_DT:           torque QP update period
+VIEWER_SYNC_DT:          viewer refresh period
 MPC_UPDATE_DT:           centroidal MPC update period
 PROFILE_LOG_DT:          timing summary print period
 ```
