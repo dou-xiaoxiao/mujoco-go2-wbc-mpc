@@ -319,8 +319,15 @@ Run the experimental slow crawl contact-sequence test:
 .\.venv\Scripts\python.exe .\scripts\simulate_srb_mpc_crawl.py
 ```
 
+Open the same crawl planner + SRB-MPC + WBC loop in the MuJoCo viewer:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\run_srb_mpc_crawl_viewer.py
+```
+
 This currently exercises the `FL -> RR -> FR -> RL` contact schedule and WBC
-task switching, but it is not yet a stable crawl gait.
+task switching. The crawl-in-place version is a planning-layer smoke test, not
+yet a forward walking gait.
 
 Solve one three-stance plus FL-swing WBC QP:
 
