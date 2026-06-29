@@ -1,7 +1,8 @@
-"""Launch a viewer for continuous commanded forward crawl."""
+"""Launch a viewer for commanded crawl locomotion."""
 
 from __future__ import annotations
 
+import argparse
 import sys
 import time
 from pathlib import Path
@@ -22,9 +23,6 @@ SWING_START = 1.0
 SWING_DURATION = 1.2
 SWING_GAP = 0.8
 SWING_HEIGHT = 0.04
-COMMAND_VX = 0.003
-COMMAND_VY = 0.0
-COMMAND_YAW_RATE = 0.0
 MAX_STEP_LENGTH = 0.035
 COMMAND_VELOCITY_REF_SCALE = 1.0
 TOUCHDOWN_Z_TOL = 0.014
@@ -35,10 +33,16 @@ LANDING_FORCE_ZERO_WEIGHT = 40.0
 MPC_NORMAL_FORCE_MIN = 5.0
 MPC_UPDATE_DT = 0.06
 WBC_UPDATE_DT = 0.01
-VIEWER_SYNC_DT = 1.0 / 60.0
 PROFILE_LOG_DT = 2.0
 PRE_SHIFT_TIME = 0.6
 SUPPORT_CENTROID_RATIO = 0.85
+
+DEMO_PRESETS = {
+    "forward": {"vx": 0.003, "vy": 0.0, "yaw_rate": 0.0},
+    "stand-step": {"vx": 0.0, "vy": 0.0, "yaw_rate": 0.0},
+    "lateral-left": {"vx": 0.0, "vy": 0.002, "yaw_rate": 0.0},
+    "turn-left": {"vx": 0.0, "vy": 0.0, "yaw_rate": 0.035},
+}
 
 sys.path.insert(0, str(SRC_ROOT))
 
@@ -57,7 +61,67 @@ from mujoco_wbc import (  # noqa: E402
 )
 
 
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Run the command-driven crawl MPC/WBC demo in the MuJoCo viewer.",
+    )
+    parser.add_argument(
+        "--demo",
+        choices=tuple(DEMO_PRESETS.keys()),
+        default="forward",
+        help="Named command preset. Explicit --vx/--vy/--yaw-rate values override it.",
+    )
+    parser.add_argument("--vx", type=float, default=None, help="Desired forward COM velocity in m/s.")
+    parser.add_argument("--vy", type=float, default=None, help="Desired lateral COM velocity in m/s.")
+    parser.add_argument("--yaw-rate", type=float, default=None, help="Desired yaw rate in rad/s.")
+    parser.add_argument("--cycles", type=int, default=CYCLES, help="Number of FL/RR/FR/RL crawl cycles.")
+    parser.add_argument("--swing-duration", type=float, default=SWING_DURATION, help="Single swing duration in seconds.")
+    parser.add_argument("--swing-gap", type=float, default=SWING_GAP, help="Time between swing windows in seconds.")
+    parser.add_argument("--swing-height", type=float, default=SWING_HEIGHT, help="Swing clearance in meters.")
+    parser.add_argument("--max-step-length", type=float, default=MAX_STEP_LENGTH, help="Planar foothold delta limit in meters.")
+    parser.add_argument("--mpc-dt", type=float, default=MPC_UPDATE_DT, help="Wall simulation period between MPC solves.")
+    parser.add_argument("--wbc-dt", type=float, default=WBC_UPDATE_DT, help="Wall simulation period between WBC solves.")
+    parser.add_argument("--viewer-hz", type=float, default=60.0, help="Viewer sync rate. Use 0 to sync every MuJoCo step.")
+    parser.add_argument("--profile-dt", type=float, default=PROFILE_LOG_DT, help="Profiler print period in simulated seconds.")
+    parser.add_argument("--no-sleep", action="store_true", help="Do not sleep to match MuJoCo real-time step.")
+    return parser
+
+
+def resolve_command(args: argparse.Namespace) -> CrawlCommand:
+    preset = DEMO_PRESETS[args.demo]
+    vx = preset["vx"] if args.vx is None else args.vx
+    vy = preset["vy"] if args.vy is None else args.vy
+    yaw_rate = preset["yaw_rate"] if args.yaw_rate is None else args.yaw_rate
+    return CrawlCommand(vx=vx, vy=vy, yaw_rate=yaw_rate)
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    if args.cycles <= 0:
+        raise ValueError("--cycles must be positive")
+    if args.swing_duration <= 0.0:
+        raise ValueError("--swing-duration must be positive")
+    if args.swing_gap < 0.0:
+        raise ValueError("--swing-gap must be non-negative")
+    if args.swing_height < 0.0:
+        raise ValueError("--swing-height must be non-negative")
+    if args.max_step_length <= 0.0:
+        raise ValueError("--max-step-length must be positive")
+    if args.mpc_dt <= 0.0:
+        raise ValueError("--mpc-dt must be positive")
+    if args.wbc_dt <= 0.0:
+        raise ValueError("--wbc-dt must be positive")
+    if args.viewer_hz < 0.0:
+        raise ValueError("--viewer-hz must be non-negative")
+    if args.profile_dt < 0.0:
+        raise ValueError("--profile-dt must be non-negative")
+
+
 def main() -> None:
+    args = build_parser().parse_args()
+    validate_args(args)
+    command = resolve_command(args)
+    viewer_sync_dt = 0.0 if args.viewer_hz <= 0.0 else 1.0 / args.viewer_hz
+
     robot = MuJoCoModelInterface(MODEL_PATH)
     robot.set_keyframe("home")
 
@@ -66,20 +130,20 @@ def main() -> None:
     initial_base_pos = robot.data.qpos[0:3].copy()
     nominal_body_xy = home_qpos_ref[0:2].copy()
     initial_foot_positions = {foot: robot.geom_position(foot) for foot in FOOT_GEOMS}
-    repeated_sequence = CRAWL_SEQUENCE * CYCLES
+    repeated_sequence = CRAWL_SEQUENCE * args.cycles
 
     planner = CrawlGaitPlanner(
         CrawlGaitConfig(
             foot_geoms=FOOT_GEOMS,
             sequence=repeated_sequence,
             first_swing_start=SWING_START,
-            swing_duration=SWING_DURATION,
-            swing_gap=SWING_GAP,
-            swing_height=SWING_HEIGHT,
+            swing_duration=args.swing_duration,
+            swing_gap=args.swing_gap,
+            swing_height=args.swing_height,
             pre_shift_time=PRE_SHIFT_TIME,
             support_centroid_ratio=SUPPORT_CENTROID_RATIO,
-            command=CrawlCommand(vx=COMMAND_VX, vy=COMMAND_VY, yaw_rate=COMMAND_YAW_RATE),
-            max_step_length=MAX_STEP_LENGTH,
+            command=command,
+            max_step_length=args.max_step_length,
             command_velocity_ref_scale=COMMAND_VELOCITY_REF_SCALE,
         )
     )
@@ -124,7 +188,7 @@ def main() -> None:
     next_wbc_update = 0.0
     next_viewer_sync = 0.0
     next_log_time = 0.0
-    next_profile_time = PROFILE_LOG_DT
+    next_profile_time = args.profile_dt
     mpc_force_ref = np.zeros(3 * len(FOOT_GEOMS))
     mpc_status = "not run"
     mpc_residual = 0.0
@@ -138,13 +202,22 @@ def main() -> None:
 
     print(
         "commanded crawl: cycles={}, command=[{:.4f}, {:.4f}, {:.4f}], step_delta={} m, mpc_dt={:.3f}s, wbc_dt={:.3f}s".format(
-            CYCLES,
-            COMMAND_VX,
-            COMMAND_VY,
-            COMMAND_YAW_RATE,
+            args.cycles,
+            command.vx,
+            command.vy,
+            command.yaw_rate,
             np.round(commanded_step_delta, 5).tolist(),
-            MPC_UPDATE_DT,
-            WBC_UPDATE_DT,
+            args.mpc_dt,
+            args.wbc_dt,
+        )
+    )
+    print(
+        "demo preset={}, swing_duration={:.2f}s, swing_gap={:.2f}s, swing_height={:.3f}m, viewer_hz={:.1f}".format(
+            args.demo,
+            args.swing_duration,
+            args.swing_gap,
+            args.swing_height,
+            args.viewer_hz,
         )
     )
 
@@ -211,7 +284,7 @@ def main() -> None:
                     mpc_force_ref = mpc_solution.first_contact_forces
                     mpc_status = mpc_solution.status
                     mpc_residual = float(np.linalg.norm(mpc_solution.dynamics_residual))
-                next_mpc_update += MPC_UPDATE_DT
+                next_mpc_update += args.mpc_dt
 
             qpos_ref = home_qpos_ref.copy()
             qpos_ref[0:3] = refs.base_position_ref
@@ -239,7 +312,7 @@ def main() -> None:
                         window_id, foot, start_time, swing_duration = current_window
                         ref = foothold_planner.swing_reference(
                             window_id,
-                            swing_height=SWING_HEIGHT,
+                            swing_height=args.swing_height,
                             start_time=start_time,
                             duration=swing_duration,
                             time_s=sim_time,
@@ -261,16 +334,16 @@ def main() -> None:
                     else:
                         last_tau = np.zeros(robot.nu)
                     last_max_tau = float(np.max(np.abs(last_tau)))
-                next_wbc_update += WBC_UPDATE_DT
+                next_wbc_update += args.wbc_dt
 
             robot.data.ctrl[:] = last_tau
 
             with profiler.time("mj_step"):
                 mujoco.mj_step(robot.model, robot.data)
-            if robot.data.time >= next_viewer_sync:
+            if viewer_sync_dt <= 0.0 or robot.data.time >= next_viewer_sync:
                 with profiler.time("viewer"):
                     viewer.sync()
-                next_viewer_sync += VIEWER_SYNC_DT
+                next_viewer_sync += viewer_sync_dt
 
             if robot.data.time >= next_log_time:
                 print(
@@ -292,7 +365,7 @@ def main() -> None:
                 )
                 next_log_time += 0.5
 
-            if robot.data.time >= next_profile_time:
+            if args.profile_dt > 0.0 and robot.data.time >= next_profile_time:
                 summary = " | ".join(profiler.summary_lines())
                 wall_now = time.perf_counter()
                 sim_elapsed = float(robot.data.time) - profile_sim_start
@@ -302,11 +375,11 @@ def main() -> None:
                 profiler.reset()
                 profile_wall_start = wall_now
                 profile_sim_start = float(robot.data.time)
-                next_profile_time += PROFILE_LOG_DT
+                next_profile_time += args.profile_dt
 
             elapsed = time.perf_counter() - step_start
             profiler.add("loop", elapsed)
-            if elapsed < dt:
+            if not args.no_sleep and elapsed < dt:
                 with profiler.time("sleep"):
                     time.sleep(dt - elapsed)
 

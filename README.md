@@ -121,7 +121,15 @@ Quick regression check for the current MPC/WBC interfaces:
 Run the continuous crawl in the MuJoCo viewer:
 
 ```powershell
-.\.venv\Scripts\python.exe .\scripts\run_srb_mpc_crawl_continuous_viewer.py
+.\.venv\Scripts\python.exe .\scripts\run_commanded_crawl_viewer.py
+```
+
+The viewer demo exposes the upper-layer command directly:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\run_commanded_crawl_viewer.py --demo forward
+.\.venv\Scripts\python.exe .\scripts\run_commanded_crawl_viewer.py --vx 0.003 --vy 0.0 --yaw-rate 0.0
+.\.venv\Scripts\python.exe .\scripts\run_commanded_crawl_viewer.py --demo stand-step
 ```
 
 The continuous crawl scripts are command-driven:
