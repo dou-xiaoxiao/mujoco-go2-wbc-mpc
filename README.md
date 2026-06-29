@@ -107,6 +107,7 @@ treated as completed gaits.
 Control stack notes:
 
 ```text
+docs/mainline_architecture.md
 docs/control_stack.md
 docs/locomotion_reference_map.md
 ```

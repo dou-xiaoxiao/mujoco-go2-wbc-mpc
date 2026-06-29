@@ -204,7 +204,7 @@ Current known limitations:
 2. No foothold planner beyond simple scripted swing targets.
 3. Horizon MPC freezes current contact positions across the horizon.
 4. Touchdown is currently based on foot height/time logic, not measured normal force.
-5. MPC is rebuilt at each update instead of using OSQP matrix updates.
+5. Runtime is still slowed by Python-side matrix/Jacobian construction.
 ```
 
 These limitations are above the basic MPC/WBC interface. They should be fixed
