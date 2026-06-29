@@ -116,6 +116,31 @@ Quick regression check for the current MPC/WBC interfaces:
 .\.venv\Scripts\python.exe .\scripts\validate_control_stack.py
 ```
 
+Run the continuous crawl in the MuJoCo viewer:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\run_srb_mpc_crawl_continuous_viewer.py
+```
+
+The viewer loop uses separate update rates:
+
+```text
+MuJoCo physics timestep: model.opt.timestep
+WBC_UPDATE_DT:           torque QP update period
+MPC_UPDATE_DT:           centroidal MPC update period
+PROFILE_LOG_DT:          timing summary print period
+```
+
+`LoopProfiler` prints compact wall-clock timing summaries such as:
+
+```text
+profile: schedule: n=... mean=...ms max=...ms | mpc: n=... | wbc: n=... | mj_step: n=... | viewer: n=...
+```
+
+This tells us whether viewer slowness is coming from MPC, WBC, MuJoCo stepping,
+viewer sync, or intentional sleep. Physics still steps at the MuJoCo timestep;
+between WBC updates the viewer holds the last solved torque command.
+
 ## Go2 Dynamics Milestone
 
 Robot model:

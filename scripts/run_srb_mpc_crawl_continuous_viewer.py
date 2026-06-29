@@ -25,7 +25,9 @@ SWING_HEIGHT = 0.04
 STEP_DELTA = np.array([0.024, 0.0, 0.0])
 TOUCHDOWN_Z_TOL = 0.02
 MPC_NORMAL_FORCE_MIN = 5.0
-MPC_UPDATE_DT = 0.03
+MPC_UPDATE_DT = 0.06
+WBC_UPDATE_DT = 0.01
+PROFILE_LOG_DT = 2.0
 PRE_SHIFT_TIME = 0.6
 SUPPORT_CENTROID_RATIO = 0.85
 
@@ -36,6 +38,7 @@ from mujoco_wbc import (  # noqa: E402
     CentroidalMPCConfig,
     CrawlGaitConfig,
     CrawlGaitPlanner,
+    LoopProfiler,
     MuJoCoModelInterface,
     SingleLegSwingWBCConfig,
     SingleLegSwingWBCQP,
@@ -104,108 +107,137 @@ def main() -> None:
     foothold_planner = planner.rolling_foothold_planner(initial_foot_positions)
     touchdown_times: dict[int, float] = {}
     next_mpc_update = 0.0
+    next_wbc_update = 0.0
     next_log_time = 0.0
+    next_profile_time = PROFILE_LOG_DT
     mpc_force_ref = np.zeros(3 * len(FOOT_GEOMS))
     mpc_status = "not run"
     mpc_residual = 0.0
+    last_tau = np.zeros(robot.nu)
+    last_wbc_status = "not run"
+    last_max_tau = 0.0
+    last_phase_key: int | None = None
+    profiler = LoopProfiler()
 
-    print(f"continuous crawl: cycles={CYCLES}, step_delta={STEP_DELTA.tolist()} m")
+    print(
+        "continuous crawl: cycles={}, step_delta={} m, mpc_dt={:.3f}s, wbc_dt={:.3f}s".format(
+            CYCLES,
+            STEP_DELTA.tolist(),
+            MPC_UPDATE_DT,
+            WBC_UPDATE_DT,
+        )
+    )
 
     with mujoco.viewer.launch_passive(robot.model, robot.data) as viewer:
         while viewer.is_running():
-            step_start = time.time()
+            step_start = time.perf_counter()
             sim_time = float(robot.data.time)
 
-            if active_window_id is None and planner.should_start_window(sim_time, next_window_id):
-                active_window_id = next_window_id
-                foot = swing_windows[active_window_id][0]
-                foothold_planner.start_swing(active_window_id, foot)
+            with profiler.time("schedule"):
+                if active_window_id is None and planner.should_start_window(sim_time, next_window_id):
+                    active_window_id = next_window_id
+                    foot = swing_windows[active_window_id][0]
+                    foothold_planner.start_swing(active_window_id, foot)
 
-            current_window = planner.window_by_id(active_window_id)
-            active_foot = current_window[1] if current_window is not None else None
+                current_window = planner.window_by_id(active_window_id)
+                active_foot = current_window[1] if current_window is not None else None
 
-            if current_window is not None:
-                window_id, foot, start_time, swing_duration = current_window
-                foot_pos = robot.geom_position(foot)
-                swing_is_done = sim_time >= start_time + swing_duration
-                foot_is_near_ground = foot_pos[2] <= foothold_planner.target_for_window(window_id)[2] + TOUCHDOWN_Z_TOL
-                if swing_is_done and foot_is_near_ground:
-                    completed_windows.add(window_id)
-                    touchdown_times[window_id] = sim_time
-                    foothold_planner.touchdown(foot, robot.geom_position(foot))
-                    active_window_id = None
-                    next_window_id = window_id + 1
-                    current_window = None
-                    active_foot = None
+                if current_window is not None:
+                    window_id, foot, start_time, swing_duration = current_window
+                    foot_pos = robot.geom_position(foot)
+                    swing_is_done = sim_time >= start_time + swing_duration
+                    foot_is_near_ground = foot_pos[2] <= foothold_planner.target_for_window(window_id)[2] + TOUCHDOWN_Z_TOL
+                    if swing_is_done and foot_is_near_ground:
+                        completed_windows.add(window_id)
+                        touchdown_times[window_id] = sim_time
+                        foothold_planner.touchdown(foot, robot.geom_position(foot))
+                        active_window_id = None
+                        next_window_id = window_id + 1
+                        current_window = None
+                        active_foot = None
 
-            refs = planner.reference_bundle(
-                home_qpos_ref,
-                home_com_ref,
-                nominal_body_xy,
-                foothold_planner.locked_positions,
-                sim_time,
-                active_window_id,
-                next_window_id,
-            )
+                refs = planner.reference_bundle(
+                    home_qpos_ref,
+                    home_com_ref,
+                    nominal_body_xy,
+                    foothold_planner.locked_positions,
+                    sim_time,
+                    active_window_id,
+                    next_window_id,
+                )
 
             if sim_time >= next_mpc_update:
-                schedule = planner.contact_schedule(
-                    current_time=sim_time,
-                    horizon_steps=mpc_config.horizon_steps,
-                    dt=mpc_config.dt,
-                    completed_windows=completed_windows,
-                    active_window_id=active_window_id,
-                )
-                mpc_solution = mpc.solve(
-                    robot,
-                    refs.com_position_ref,
-                    com_velocity_ref=refs.com_velocity_ref,
-                    contact_schedule=schedule,
-                )
-                mpc_force_ref = mpc_solution.first_contact_forces
-                mpc_status = mpc_solution.status
-                mpc_residual = float(np.linalg.norm(mpc_solution.dynamics_residual))
+                with profiler.time("mpc"):
+                    schedule = planner.contact_schedule(
+                        current_time=sim_time,
+                        horizon_steps=mpc_config.horizon_steps,
+                        dt=mpc_config.dt,
+                        completed_windows=completed_windows,
+                        active_window_id=active_window_id,
+                    )
+                    mpc_solution = mpc.solve(
+                        robot,
+                        refs.com_position_ref,
+                        com_velocity_ref=refs.com_velocity_ref,
+                        contact_schedule=schedule,
+                    )
+                    mpc_force_ref = mpc_solution.first_contact_forces
+                    mpc_status = mpc_solution.status
+                    mpc_residual = float(np.linalg.norm(mpc_solution.dynamics_residual))
                 next_mpc_update += MPC_UPDATE_DT
 
             qpos_ref = home_qpos_ref.copy()
             qpos_ref[0:3] = refs.base_position_ref
             qpos_ref[3:7] = refs.base_orientation_ref
 
-            if current_window is None:
-                phase_name = "stance"
-                solution = stance_controller.solve(
-                    robot,
-                    qpos_ref,
-                    force_ref=mpc_force_ref,
-                    stance_pos_refs=foothold_planner.locked_positions,
-                )
-            else:
-                window_id, foot, start_time, swing_duration = current_window
-                phase_name = f"{foot}-swing"
-                ref = foothold_planner.swing_reference(
-                    window_id,
-                    swing_height=SWING_HEIGHT,
-                    start_time=start_time,
-                    duration=swing_duration,
-                    time_s=sim_time,
-                )
-                solution = swing_controllers[foot].solve(
-                    robot,
-                    qpos_ref,
-                    ref.position,
-                    ref.velocity,
-                    ref.acceleration,
-                    force_ref=force_ref_for_stance_feet(mpc_force_ref, foot),
-                    stance_pos_refs={stance_foot: foothold_planner.locked_positions[stance_foot] for stance_foot in FOOT_GEOMS if stance_foot != foot},
-                )
+            phase_key = active_window_id
+            if phase_key != last_phase_key:
+                next_wbc_update = sim_time
+                last_phase_key = phase_key
+            phase_name = "stance" if current_window is None else f"{current_window[1]}-swing"
 
-            if solution.status in ("solved", "solved inaccurate") and mpc_status in ("solved", "solved inaccurate"):
-                robot.data.ctrl[:] = solution.tau
-            else:
-                robot.data.ctrl[:] = 0.0
+            if sim_time >= next_wbc_update:
+                with profiler.time("wbc"):
+                    if current_window is None:
+                        solution = stance_controller.solve(
+                            robot,
+                            qpos_ref,
+                            force_ref=mpc_force_ref,
+                            stance_pos_refs=foothold_planner.locked_positions,
+                        )
+                    else:
+                        window_id, foot, start_time, swing_duration = current_window
+                        ref = foothold_planner.swing_reference(
+                            window_id,
+                            swing_height=SWING_HEIGHT,
+                            start_time=start_time,
+                            duration=swing_duration,
+                            time_s=sim_time,
+                        )
+                        solution = swing_controllers[foot].solve(
+                            robot,
+                            qpos_ref,
+                            ref.position,
+                            ref.velocity,
+                            ref.acceleration,
+                            force_ref=force_ref_for_stance_feet(mpc_force_ref, foot),
+                            stance_pos_refs={stance_foot: foothold_planner.locked_positions[stance_foot] for stance_foot in FOOT_GEOMS if stance_foot != foot},
+                        )
 
-            mujoco.mj_step(robot.model, robot.data)
-            viewer.sync()
+                    last_wbc_status = solution.status
+                    if solution.status in ("solved", "solved inaccurate") and mpc_status in ("solved", "solved inaccurate"):
+                        last_tau = solution.tau.copy()
+                    else:
+                        last_tau = np.zeros(robot.nu)
+                    last_max_tau = float(np.max(np.abs(last_tau)))
+                next_wbc_update += WBC_UPDATE_DT
+
+            robot.data.ctrl[:] = last_tau
+
+            with profiler.time("mj_step"):
+                mujoco.mj_step(robot.model, robot.data)
+            with profiler.time("viewer"):
+                viewer.sync()
 
             if robot.data.time >= next_log_time:
                 print(
@@ -219,17 +251,25 @@ def main() -> None:
                         np.round(robot.data.qpos[0:3] - initial_base_pos, 4).tolist(),
                         np.round(refs.base_position_ref[0:2], 4).tolist(),
                         len(touchdown_times),
-                        float(np.max(np.abs(solution.tau))),
+                        last_max_tau,
                         mpc_status,
-                        solution.status,
+                        last_wbc_status,
                         mpc_residual,
                     )
                 )
                 next_log_time += 0.5
 
-            elapsed = time.time() - step_start
+            if robot.data.time >= next_profile_time:
+                summary = " | ".join(profiler.summary_lines())
+                print(f"profile: {summary}")
+                profiler.reset()
+                next_profile_time += PROFILE_LOG_DT
+
+            elapsed = time.perf_counter() - step_start
+            profiler.add("loop", elapsed)
             if elapsed < dt:
-                time.sleep(dt - elapsed)
+                with profiler.time("sleep"):
+                    time.sleep(dt - elapsed)
 
 
 def force_ref_for_stance_feet(force_ref_all: np.ndarray, swing_foot: str) -> np.ndarray:
