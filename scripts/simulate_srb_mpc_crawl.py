@@ -1,0 +1,286 @@
+"""Run a headless slow crawl sequence with SRB-MPC force references.
+
+This script exercises contact schedule switching, but it is not a stable gait
+yet. The missing piece is an upper-layer body-reference and foothold scheduler.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import mujoco
+import numpy as np
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = PROJECT_ROOT / "src"
+MODEL_PATH = PROJECT_ROOT / "models" / "mujoco_menagerie" / "unitree_go2" / "scene.xml"
+FOOT_GEOMS = ("FL", "FR", "RL", "RR")
+CRAWL_SEQUENCE = ("FL", "RR", "FR", "RL")
+SWING_START = 1.0
+SWING_DURATION = 1.2
+SWING_GAP = 0.8
+SWING_HEIGHT = 0.035
+STEP_DELTA = np.array([0.0, 0.0, 0.0])
+TOUCHDOWN_Z_TOL = 0.018
+MPC_NORMAL_FORCE_MIN = 5.0
+MPC_UPDATE_DT = 0.03
+PRE_SHIFT_TIME = 0.6
+BODY_SHIFT_BY_SWING_FOOT = {
+    "FL": np.array([0.0, 0.0]),
+    "RR": np.array([0.0, 0.0]),
+    "FR": np.array([0.0, 0.0]),
+    "RL": np.array([0.0, 0.0]),
+}
+
+sys.path.insert(0, str(SRC_ROOT))
+
+from mujoco_wbc import (  # noqa: E402
+    CentroidalMPC,
+    CentroidalMPCConfig,
+    MuJoCoModelInterface,
+    SingleLegSwingWBCConfig,
+    SingleLegSwingWBCQP,
+    StanceWBCConfig,
+    StanceWBCQP,
+    scheduled_swing_contacts,
+    swing_foothold_reference,
+)
+
+
+def main() -> None:
+    robot = MuJoCoModelInterface(MODEL_PATH)
+    robot.set_keyframe("home")
+    home_qpos_ref = robot.q
+    home_com_ref = robot.center_of_mass()
+    initial_foot_positions = {foot: robot.geom_position(foot) for foot in FOOT_GEOMS}
+    target_footholds = {foot: initial_foot_positions[foot] + STEP_DELTA for foot in FOOT_GEOMS}
+    swing_windows = build_swing_windows()
+
+    mpc_config = CentroidalMPCConfig(
+        contact_geoms=FOOT_GEOMS,
+        horizon_steps=12,
+        dt=0.03,
+        normal_force_min=MPC_NORMAL_FORCE_MIN,
+    )
+    mpc = CentroidalMPC(mpc_config)
+    stance_controller = StanceWBCQP(
+        StanceWBCConfig(
+            foot_geoms=FOOT_GEOMS,
+            weight_force=1.0,
+            kp_stance=120.0,
+            kd_stance=24.0,
+        )
+    )
+
+    swing_controllers = {
+        foot: SingleLegSwingWBCQP(
+            SingleLegSwingWBCConfig(
+                stance_foot_geoms=tuple(other for other in FOOT_GEOMS if other != foot),
+                swing_foot_geom=foot,
+                normal_force_min=MPC_NORMAL_FORCE_MIN,
+                weight_swing_foot=1600.0,
+                weight_force=1.0,
+                kp_swing=500.0,
+                kd_swing=45.0,
+                kp_stance=120.0,
+                kd_stance=24.0,
+            )
+        )
+        for foot in FOOT_GEOMS
+    }
+
+    dt = float(robot.model.opt.timestep)
+    duration = swing_windows[-1][1] + swing_windows[-1][2] + 1.0
+    steps = int(duration / dt)
+
+    completed_windows: set[int] = set()
+    active_window_id: int | None = None
+    next_window_id = 0
+    locked_foot_positions = {foot: pos.copy() for foot, pos in initial_foot_positions.items()}
+    touchdown_times: dict[str, float] = {}
+    max_dyn_residual = 0.0
+    max_stance_residual = 0.0
+    max_mpc_residual = 0.0
+    max_swing_pos_error = 0.0
+    max_tau = 0.0
+    failed_statuses: dict[str, int] = {}
+    next_mpc_update = 0.0
+    mpc_force_ref = np.zeros(3 * len(FOOT_GEOMS))
+    mpc_status = "not run"
+    mpc_residual = 0.0
+    max_swing_knots = {foot: 0 for foot in FOOT_GEOMS}
+
+    for _ in range(steps):
+        sim_time = float(robot.data.time)
+        if active_window_id is None and next_window_id < len(swing_windows):
+            _, start_time, _ = swing_windows[next_window_id]
+            if sim_time >= start_time:
+                active_window_id = next_window_id
+
+        current_window = window_by_id(swing_windows, active_window_id)
+        active_foot = current_window[1] if current_window is not None else None
+
+        if current_window is not None:
+            window_id, foot, start_time, swing_duration = current_window
+            foot_pos = robot.geom_position(foot)
+            swing_is_done = sim_time >= start_time + swing_duration
+            foot_is_near_ground = foot_pos[2] <= target_footholds[foot][2] + TOUCHDOWN_Z_TOL
+            if swing_is_done and foot_is_near_ground:
+                completed_windows.add(window_id)
+                touchdown_times[foot] = sim_time
+                locked_foot_positions[foot] = robot.geom_position(foot)
+                active_window_id = None
+                next_window_id = window_id + 1
+                current_window = None
+                active_foot = None
+
+        if sim_time >= next_mpc_update:
+            visible_windows = swing_windows if active_window_id is None else swing_windows[: active_window_id + 1]
+            schedule = scheduled_swing_contacts(
+                FOOT_GEOMS,
+                visible_windows,
+                current_time=sim_time,
+                horizon_steps=mpc_config.horizon_steps,
+                dt=mpc_config.dt,
+                completed_windows=completed_windows,
+            )
+            if active_window_id is not None:
+                active_foot_idx = FOOT_GEOMS.index(swing_windows[active_window_id][0])
+                schedule[:, active_foot_idx] = False
+            support_shift = body_shift_xy_for_time(sim_time, swing_windows, active_window_id, next_window_id)
+            com_ref = home_com_ref.copy()
+            com_ref[0:2] += support_shift
+            mpc_solution = mpc.solve(robot, com_ref, contact_schedule=schedule)
+            mpc_force_ref = mpc_solution.first_contact_forces
+            mpc_status = mpc_solution.status
+            mpc_residual = float(np.linalg.norm(mpc_solution.dynamics_residual))
+            for foot_idx, foot in enumerate(FOOT_GEOMS):
+                max_swing_knots[foot] = max(max_swing_knots[foot], int(np.count_nonzero(~schedule[:, foot_idx])))
+            next_mpc_update += MPC_UPDATE_DT
+
+        qpos_ref = home_qpos_ref.copy()
+        qpos_ref[0:2] += body_shift_xy_for_time(sim_time, swing_windows, active_window_id, next_window_id)
+
+        if current_window is None:
+            solution = stance_controller.solve(
+                robot,
+                qpos_ref,
+                force_ref=mpc_force_ref,
+                stance_pos_refs=locked_foot_positions,
+            )
+            target_pos = None
+        else:
+            _, foot, start_time, swing_duration = current_window
+            stance_feet = tuple(other for other in FOOT_GEOMS if other != foot)
+            ref = swing_foothold_reference(
+                initial_position=initial_foot_positions[foot],
+                step_delta=STEP_DELTA,
+                swing_height=SWING_HEIGHT,
+                start_time=start_time,
+                duration=swing_duration,
+                time_s=sim_time,
+            )
+            target_pos = ref.position
+            stance_force_ref = force_ref_for_stance_feet(mpc_force_ref, foot)
+            stance_pos_refs = {
+                stance_foot: locked_foot_positions[stance_foot]
+                for stance_foot in FOOT_GEOMS
+                if stance_foot != foot
+            }
+            solution = swing_controllers[foot].solve(
+                robot,
+                qpos_ref,
+                ref.position,
+                ref.velocity,
+                ref.acceleration,
+                force_ref=stance_force_ref,
+                stance_pos_refs=stance_pos_refs,
+            )
+            del stance_feet
+
+        if solution.status not in ("solved", "solved inaccurate") or mpc_status not in ("solved", "solved inaccurate"):
+            key = f"mpc={mpc_status}, wbc={solution.status}"
+            failed_statuses[key] = failed_statuses.get(key, 0) + 1
+            robot.data.ctrl[:] = 0.0
+        else:
+            robot.data.ctrl[:] = solution.tau
+
+        mujoco.mj_step(robot.model, robot.data)
+
+        if current_window is not None and target_pos is not None:
+            swing_error = robot.geom_position(current_window[1]) - target_pos
+            max_swing_pos_error = max(max_swing_pos_error, float(np.linalg.norm(swing_error)))
+        max_dyn_residual = max(max_dyn_residual, float(np.linalg.norm(solution.dynamics_residual)))
+        max_stance_residual = max(max_stance_residual, float(np.linalg.norm(solution.stance_residual)))
+        max_mpc_residual = max(max_mpc_residual, mpc_residual)
+        max_tau = max(max_tau, float(np.max(np.abs(solution.tau))))
+
+    print("=== SRB-MPC + WBC slow crawl-in-place smoke test ===")
+    print(f"sequence              = {CRAWL_SEQUENCE}")
+    print(f"duration              = {duration:.3f} s")
+    print(f"swing duration/gap    = {SWING_DURATION:.3f} / {SWING_GAP:.3f} s")
+    print(f"step delta            = {STEP_DELTA.tolist()} m")
+    print(f"touchdown times       = {touchdown_times}")
+    print(f"max swing knots       = {max_swing_knots}")
+    for foot in CRAWL_SEQUENCE:
+        final_pos = robot.geom_position(foot)
+        print(
+            f"{foot}: final={np.round(final_pos, 5).tolist()} "
+            f"target={np.round(target_footholds[foot], 5).tolist()} "
+            f"error={np.round(final_pos - target_footholds[foot], 5).tolist()}"
+        )
+    print(f"final base pos        = {np.round(robot.data.qpos[0:3], 5).tolist()}")
+    print(f"max swing pos error   = {max_swing_pos_error:.3e} m")
+    print(f"max |tau|             = {max_tau:.3e} Nm")
+    print(f"max WBC dyn residual  = {max_dyn_residual:.3e}")
+    print(f"max stance residual   = {max_stance_residual:.3e}")
+    print(f"max MPC residual      = {max_mpc_residual:.3e}")
+    print(f"failed statuses       = {failed_statuses}")
+
+
+def build_swing_windows() -> list[tuple[str, float, float]]:
+    windows = []
+    for idx, foot in enumerate(CRAWL_SEQUENCE):
+        start = SWING_START + idx * (SWING_DURATION + SWING_GAP)
+        windows.append((foot, start, SWING_DURATION))
+    return windows
+
+
+def window_by_id(windows: list[tuple[str, float, float]], window_id: int | None) -> tuple[int, str, float, float] | None:
+    if window_id is None:
+        return None
+    foot, start_time, duration = windows[window_id]
+    return window_id, foot, start_time, duration
+
+
+def body_shift_xy_for_time(
+    time_s: float,
+    windows: list[tuple[str, float, float]],
+    active_window_id: int | None,
+    next_window_id: int,
+) -> np.ndarray:
+    if active_window_id is not None:
+        return BODY_SHIFT_BY_SWING_FOOT[windows[active_window_id][0]]
+    if next_window_id >= len(windows):
+        return np.zeros(2)
+
+    foot, start_time, _ = windows[next_window_id]
+    if time_s < start_time - PRE_SHIFT_TIME:
+        return np.zeros(2)
+    if time_s >= start_time:
+        return BODY_SHIFT_BY_SWING_FOOT[foot]
+
+    ratio = (time_s - (start_time - PRE_SHIFT_TIME)) / PRE_SHIFT_TIME
+    s = 3.0 * ratio * ratio - 2.0 * ratio * ratio * ratio
+    return s * BODY_SHIFT_BY_SWING_FOOT[foot]
+
+
+def force_ref_for_stance_feet(force_ref_all: np.ndarray, swing_foot: str) -> np.ndarray:
+    forces = force_ref_all.reshape(len(FOOT_GEOMS), 3)
+    return np.vstack([force for foot, force in zip(FOOT_GEOMS, forces) if foot != swing_foot]).reshape(-1)
+
+
+if __name__ == "__main__":
+    main()
