@@ -74,11 +74,21 @@ class RollingFootholdPlanner:
     generated relative to its current locked stance position.
     """
 
-    def __init__(self, foot_geoms: tuple[str, ...], initial_foot_positions: dict[str, Array], step_delta: Array):
+    def __init__(
+        self,
+        foot_geoms: tuple[str, ...],
+        initial_foot_positions: dict[str, Array],
+        step_delta: Array,
+        step_deltas_by_foot: dict[str, Array] | None = None,
+    ):
         self.foot_geoms = foot_geoms
         self.step_delta = np.asarray(step_delta, dtype=float)
         if self.step_delta.shape != (3,):
             raise ValueError(f"step_delta must have shape (3,), got {self.step_delta.shape}")
+        self.step_deltas_by_foot = {
+            foot: np.asarray(delta, dtype=float).copy()
+            for foot, delta in (step_deltas_by_foot or {}).items()
+        }
         self.locked_positions = {
             foot: np.asarray(initial_foot_positions[foot], dtype=float).copy()
             for foot in foot_geoms
@@ -91,10 +101,13 @@ class RollingFootholdPlanner:
             window_id=window_id,
             foot=foot,
             initial_position=initial,
-            target_position=initial + self.step_delta,
+            target_position=initial + self.step_delta_for_foot(foot),
         )
         self.plans[window_id] = plan
         return plan
+
+    def step_delta_for_foot(self, foot: str) -> Array:
+        return self.step_deltas_by_foot.get(foot, self.step_delta)
 
     def touchdown(self, foot: str, actual_position: Array) -> None:
         self.locked_positions[foot] = np.asarray(actual_position, dtype=float).copy()
@@ -244,11 +257,16 @@ class CrawlGaitPlanner:
         return {foot: self.stance_feet_for_swing(foot) for foot in self.config.foot_geoms}
 
     def rolling_foothold_planner(self, initial_foot_positions: dict[str, Array]) -> RollingFootholdPlanner:
-        return RollingFootholdPlanner(self.config.foot_geoms, initial_foot_positions, self.step_delta())
+        return RollingFootholdPlanner(
+            self.config.foot_geoms,
+            initial_foot_positions,
+            self.step_delta(),
+            self.foothold_deltas(initial_foot_positions),
+        )
 
     def target_footholds(self, initial_foot_positions: dict[str, Array]) -> dict[str, Array]:
-        delta = self.step_delta()
-        return {foot: np.asarray(pos, dtype=float) + delta for foot, pos in initial_foot_positions.items()}
+        deltas = self.foothold_deltas(initial_foot_positions)
+        return {foot: np.asarray(pos, dtype=float) + deltas[foot] for foot, pos in initial_foot_positions.items()}
 
     def step_delta(self) -> Array:
         if self.config.command is None:
@@ -262,10 +280,38 @@ class CrawlGaitPlanner:
             delta[0:2] *= self.config.max_step_length / planar_norm
         return delta
 
+    def foothold_deltas(self, initial_foot_positions: dict[str, Array]) -> dict[str, Array]:
+        return {
+            foot: self.foothold_delta(foot, initial_foot_positions)
+            for foot in self.config.foot_geoms
+        }
+
+    def foothold_delta(self, foot: str, initial_foot_positions: dict[str, Array]) -> Array:
+        delta = self.step_delta().copy()
+        command = self.config.command
+        if command is None or command.yaw_rate == 0.0:
+            return delta
+
+        center_xy = np.mean(
+            np.vstack([np.asarray(initial_foot_positions[name], dtype=float)[0:2] for name in self.config.foot_geoms]),
+            axis=0,
+        )
+        foot_xy = np.asarray(initial_foot_positions[foot], dtype=float)[0:2]
+        offset_xy = foot_xy - center_xy
+        yaw_angle = command.yaw_rate * self.cycle_duration()
+        delta[0:2] += yaw_angle * np.array([-offset_xy[1], offset_xy[0]], dtype=float)
+        self._limit_planar_delta(delta)
+        return delta
+
     def cycle_duration(self) -> float:
         if not self.config.sequence:
             return 0.0
         return len(self.config.sequence) * (self.config.swing_duration + self.config.swing_gap)
+
+    def _limit_planar_delta(self, delta: Array) -> None:
+        planar_norm = float(np.linalg.norm(delta[0:2]))
+        if planar_norm > self.config.max_step_length:
+            delta[0:2] *= self.config.max_step_length / planar_norm
 
     def contact_schedule(
         self,
@@ -349,7 +395,7 @@ class CrawlGaitPlanner:
     ) -> SwingReference:
         return swing_foothold_reference(
             initial_position=initial_foot_positions[foot],
-            step_delta=self.step_delta(),
+            step_delta=self.foothold_delta(foot, initial_foot_positions),
             swing_height=self.config.swing_height,
             start_time=start_time,
             duration=duration,

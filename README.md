@@ -108,6 +108,7 @@ Control stack notes:
 
 ```text
 docs/control_stack.md
+docs/locomotion_reference_map.md
 ```
 
 Quick regression check for the current MPC/WBC interfaces:
