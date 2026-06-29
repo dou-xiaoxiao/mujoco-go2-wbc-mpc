@@ -329,6 +329,18 @@ This currently exercises the `FL -> RR -> FR -> RL` contact schedule and WBC
 task switching. The crawl-in-place version is a planning-layer smoke test, not
 yet a forward walking gait.
 
+Run one commanded forward crawl cycle:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\simulate_srb_mpc_crawl_forward.py
+```
+
+Open the commanded forward crawl in the MuJoCo viewer:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\run_srb_mpc_crawl_forward_viewer.py
+```
+
 Solve one three-stance plus FL-swing WBC QP:
 
 ```powershell

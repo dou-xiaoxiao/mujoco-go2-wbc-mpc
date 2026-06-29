@@ -15,6 +15,13 @@ Array = np.ndarray
 
 
 @dataclass(frozen=True)
+class CrawlCommand:
+    vx: float = 0.0
+    vy: float = 0.0
+    yaw_rate: float = 0.0
+
+
+@dataclass(frozen=True)
 class CrawlGaitConfig:
     foot_geoms: tuple[str, ...] = ("FL", "FR", "RL", "RR")
     sequence: tuple[str, ...] = ("FL", "RR", "FR", "RL")
@@ -25,6 +32,8 @@ class CrawlGaitConfig:
     step_delta: Array | tuple[float, float, float] = (0.0, 0.0, 0.0)
     pre_shift_time: float = 0.6
     support_centroid_ratio: float = 0.85
+    command: CrawlCommand | None = None
+    max_step_length: float = 0.04
 
 
 @dataclass(frozen=True)
@@ -88,8 +97,25 @@ class CrawlGaitPlanner:
         return tuple(foot for foot in self.config.foot_geoms if foot != swing_foot)
 
     def target_footholds(self, initial_foot_positions: dict[str, Array]) -> dict[str, Array]:
-        delta = np.asarray(self.config.step_delta, dtype=float)
+        delta = self.step_delta()
         return {foot: np.asarray(pos, dtype=float) + delta for foot, pos in initial_foot_positions.items()}
+
+    def step_delta(self) -> Array:
+        if self.config.command is None:
+            return np.asarray(self.config.step_delta, dtype=float)
+
+        cycle_time = self.cycle_duration()
+        command = self.config.command
+        delta = np.array([command.vx * cycle_time, command.vy * cycle_time, 0.0], dtype=float)
+        planar_norm = float(np.linalg.norm(delta[0:2]))
+        if planar_norm > self.config.max_step_length:
+            delta[0:2] *= self.config.max_step_length / planar_norm
+        return delta
+
+    def cycle_duration(self) -> float:
+        if not self.config.sequence:
+            return 0.0
+        return len(self.config.sequence) * (self.config.swing_duration + self.config.swing_gap)
 
     def contact_schedule(
         self,
@@ -127,7 +153,12 @@ class CrawlGaitPlanner:
         if active_window_id is not None:
             return target
         if next_window_id >= len(self.windows):
-            return nominal.copy()
+            all_support_points_xy = np.vstack([locked_foot_positions[foot][0:2] for foot in self.config.foot_geoms])
+            return body_reference_from_support(
+                nominal,
+                all_support_points_xy,
+                centroid_ratio=self.config.support_centroid_ratio,
+            )
 
         next_window = self.windows[next_window_id]
         shift_start = next_window.start_time - self.config.pre_shift_time
@@ -150,7 +181,7 @@ class CrawlGaitPlanner:
     ) -> SwingReference:
         return swing_foothold_reference(
             initial_position=initial_foot_positions[foot],
-            step_delta=np.asarray(self.config.step_delta, dtype=float),
+            step_delta=self.step_delta(),
             swing_height=self.config.swing_height,
             start_time=start_time,
             duration=duration,
@@ -207,3 +238,5 @@ class CrawlGaitPlanner:
         step_delta = np.asarray(cfg.step_delta, dtype=float)
         if step_delta.shape != (3,):
             raise ValueError(f"step_delta must have shape (3,), got {step_delta.shape}")
+        if cfg.max_step_length <= 0.0:
+            raise ValueError("max_step_length must be positive")

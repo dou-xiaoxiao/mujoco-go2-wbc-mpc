@@ -16,7 +16,7 @@ from .contact_schedule import (
     single_leg_swing_schedule,
 )
 from .model_interface import MuJoCoModelInterface
-from .planning import CrawlGaitConfig, CrawlGaitPlanner, SwingWindow
+from .planning import CrawlCommand, CrawlGaitConfig, CrawlGaitPlanner, SwingWindow
 from .support_polygon import SupportReference, body_reference_from_support, support_centroid
 from .swing_trajectory import SwingReference, smoothstep, swing_foothold_reference
 from .wbc_qp import (
@@ -40,6 +40,7 @@ __all__ = [
     "active_swing_window",
     "current_single_leg_phase",
     "CrawlGaitConfig",
+    "CrawlCommand",
     "CrawlGaitPlanner",
     "SingleLegSwingWBCConfig",
     "SingleLegSwingWBCQP",

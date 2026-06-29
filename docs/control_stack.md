@@ -25,6 +25,16 @@ CrawlGaitPlanner
 It does not solve dynamics. It only generates tasks for SRB-MPC and WBC.
 The lower layers still own force optimization and torque generation.
 
+The first walking command is:
+
+```text
+CrawlCommand(vx, vy, yaw_rate)
+```
+
+Only `vx` and `vy` are active in the first version. The planner converts the
+command into a conservative per-foot `step_delta` over one gait cycle and then
+generates footholds from that step delta. `yaw_rate` is reserved for turning.
+
 ## Coordinate Conventions
 
 The MuJoCo model is a floating-base Go2:
