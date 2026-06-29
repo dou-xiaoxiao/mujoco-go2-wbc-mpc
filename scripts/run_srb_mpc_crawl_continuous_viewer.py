@@ -22,7 +22,11 @@ SWING_START = 1.0
 SWING_DURATION = 1.2
 SWING_GAP = 0.8
 SWING_HEIGHT = 0.04
-STEP_DELTA = np.array([0.024, 0.0, 0.0])
+COMMAND_VX = 0.003
+COMMAND_VY = 0.0
+COMMAND_YAW_RATE = 0.0
+MAX_STEP_LENGTH = 0.035
+COMMAND_VELOCITY_REF_SCALE = 1.0
 TOUCHDOWN_Z_TOL = 0.02
 MPC_NORMAL_FORCE_MIN = 5.0
 MPC_UPDATE_DT = 0.06
@@ -36,6 +40,7 @@ sys.path.insert(0, str(SRC_ROOT))
 from mujoco_wbc import (  # noqa: E402
     CentroidalMPC,
     CentroidalMPCConfig,
+    CrawlCommand,
     CrawlGaitConfig,
     CrawlGaitPlanner,
     LoopProfiler,
@@ -66,12 +71,15 @@ def main() -> None:
             swing_duration=SWING_DURATION,
             swing_gap=SWING_GAP,
             swing_height=SWING_HEIGHT,
-            step_delta=STEP_DELTA,
             pre_shift_time=PRE_SHIFT_TIME,
             support_centroid_ratio=SUPPORT_CENTROID_RATIO,
+            command=CrawlCommand(vx=COMMAND_VX, vy=COMMAND_VY, yaw_rate=COMMAND_YAW_RATE),
+            max_step_length=MAX_STEP_LENGTH,
+            command_velocity_ref_scale=COMMAND_VELOCITY_REF_SCALE,
         )
     )
     swing_windows = planner.swing_windows()
+    commanded_step_delta = planner.step_delta()
 
     mpc_config = CentroidalMPCConfig(
         contact_geoms=FOOT_GEOMS,
@@ -118,11 +126,16 @@ def main() -> None:
     last_max_tau = 0.0
     last_phase_key: int | None = None
     profiler = LoopProfiler()
+    profile_wall_start = time.perf_counter()
+    profile_sim_start = 0.0
 
     print(
-        "continuous crawl: cycles={}, step_delta={} m, mpc_dt={:.3f}s, wbc_dt={:.3f}s".format(
+        "commanded crawl: cycles={}, command=[{:.4f}, {:.4f}, {:.4f}], step_delta={} m, mpc_dt={:.3f}s, wbc_dt={:.3f}s".format(
             CYCLES,
-            STEP_DELTA.tolist(),
+            COMMAND_VX,
+            COMMAND_VY,
+            COMMAND_YAW_RATE,
+            np.round(commanded_step_delta, 5).tolist(),
             MPC_UPDATE_DT,
             WBC_UPDATE_DT,
         )
@@ -261,8 +274,14 @@ def main() -> None:
 
             if robot.data.time >= next_profile_time:
                 summary = " | ".join(profiler.summary_lines())
-                print(f"profile: {summary}")
+                wall_now = time.perf_counter()
+                sim_elapsed = float(robot.data.time) - profile_sim_start
+                wall_elapsed = wall_now - profile_wall_start
+                rtf = sim_elapsed / wall_elapsed if wall_elapsed > 0.0 else 0.0
+                print(f"profile: sim={sim_elapsed:.2f}s wall={wall_elapsed:.2f}s rtf={rtf:.2f} | {summary}")
                 profiler.reset()
+                profile_wall_start = wall_now
+                profile_sim_start = float(robot.data.time)
                 next_profile_time += PROFILE_LOG_DT
 
             elapsed = time.perf_counter() - step_start

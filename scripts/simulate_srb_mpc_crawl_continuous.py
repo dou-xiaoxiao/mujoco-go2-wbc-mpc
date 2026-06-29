@@ -20,7 +20,11 @@ SWING_START = 1.0
 SWING_DURATION = 1.2
 SWING_GAP = 0.8
 SWING_HEIGHT = 0.04
-STEP_DELTA = np.array([0.024, 0.0, 0.0])
+COMMAND_VX = 0.003
+COMMAND_VY = 0.0
+COMMAND_YAW_RATE = 0.0
+MAX_STEP_LENGTH = 0.035
+COMMAND_VELOCITY_REF_SCALE = 1.0
 TOUCHDOWN_Z_TOL = 0.02
 MPC_NORMAL_FORCE_MIN = 5.0
 MPC_UPDATE_DT = 0.03
@@ -32,6 +36,7 @@ sys.path.insert(0, str(SRC_ROOT))
 from mujoco_wbc import (  # noqa: E402
     CentroidalMPC,
     CentroidalMPCConfig,
+    CrawlCommand,
     CrawlGaitConfig,
     CrawlGaitPlanner,
     MuJoCoModelInterface,
@@ -60,12 +65,15 @@ def main() -> None:
             swing_duration=SWING_DURATION,
             swing_gap=SWING_GAP,
             swing_height=SWING_HEIGHT,
-            step_delta=STEP_DELTA,
             pre_shift_time=PRE_SHIFT_TIME,
             support_centroid_ratio=SUPPORT_CENTROID_RATIO,
+            command=CrawlCommand(vx=COMMAND_VX, vy=COMMAND_VY, yaw_rate=COMMAND_YAW_RATE),
+            max_step_length=MAX_STEP_LENGTH,
+            command_velocity_ref_scale=COMMAND_VELOCITY_REF_SCALE,
         )
     )
     swing_windows = planner.swing_windows()
+    commanded_step_delta = planner.step_delta()
 
     mpc_config = CentroidalMPCConfig(
         contact_geoms=FOOT_GEOMS,
@@ -219,7 +227,8 @@ def main() -> None:
     print("=== SRB-MPC + WBC continuous forward crawl smoke test ===")
     print(f"cycles                = {CYCLES}")
     print(f"sequence              = {repeated_sequence}")
-    print(f"step delta            = {STEP_DELTA.tolist()} m")
+    print(f"command               = vx={COMMAND_VX:.4f}, vy={COMMAND_VY:.4f}, yaw_rate={COMMAND_YAW_RATE:.4f}")
+    print(f"commanded step delta  = {np.round(commanded_step_delta, 5).tolist()} m")
     print(f"duration              = {duration:.3f} s")
     print(f"touchdowns completed  = {len(touchdown_times)} / {len(swing_windows)}")
     print(f"initial base pos      = {np.round(initial_base_pos, 5).tolist()}")

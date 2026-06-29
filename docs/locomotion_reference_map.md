@@ -71,6 +71,19 @@ com_position_ref
 com_velocity_ref
 ```
 
+The current body reference is still deliberately quasi-static in position:
+
+```text
+body xy ref -> support-centroid-biased target for the upcoming stance triangle
+```
+
+When `CrawlCommand` is present, the planner also passes a small COM velocity
+reference to MPC:
+
+```text
+com_velocity_ref = command_velocity_ref_scale * [vx, vy, 0]
+```
+
 `CentroidalMPC` consumes:
 
 ```text
@@ -117,14 +130,18 @@ target_foothold_W =
 Current first version:
 
 ```text
-velocity_feedforward_W = cycle_duration * [vx, vy, 0]
-yaw_feedforward_W      = yaw_rate * cycle_duration * z_axis_cross_foot_offset
+velocity_feedforward_W = gait_cycle_duration * [vx, vy, 0]
+yaw_feedforward_W      = yaw_rate * gait_cycle_duration * z_axis_cross_foot_offset
 stability_bias_W       = small shift toward the support centroid
 ```
 
-The current implementation includes velocity and yaw feedforward. The stability
-bias is intentionally left as a planner-tuning item, because it should be tested
-against the MPC/WBC response rather than baked into the first command interface.
+The current implementation includes velocity and yaw feedforward. The gait
+cycle duration is based on one pass through the foot set, not the total number
+of repeated cycles in a script.
+
+The stability bias is intentionally left as a planner-tuning item, because it
+should be tested against the MPC/WBC response rather than baked into the first
+command interface.
 
 This keeps the learning target clear:
 

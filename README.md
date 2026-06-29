@@ -123,6 +123,31 @@ Run the continuous crawl in the MuJoCo viewer:
 .\.venv\Scripts\python.exe .\scripts\run_srb_mpc_crawl_continuous_viewer.py
 ```
 
+The continuous crawl scripts are command-driven:
+
+```text
+CrawlCommand(vx, vy, yaw_rate)
+    -> command-based foothold deltas
+    -> support-centroid body reference
+    -> COM position/velocity reference
+    -> centroidal MPC force reference
+    -> WBC torque command
+```
+
+The default viewer command is deliberately conservative:
+
+```text
+vx = 0.003 m/s
+vy = 0.000 m/s
+yaw_rate = 0.000 rad/s
+```
+
+With the default crawl timing, this produces:
+
+```text
+step_delta = [0.024, 0.0, 0.0] m
+```
+
 The viewer loop uses separate update rates:
 
 ```text
@@ -132,10 +157,10 @@ MPC_UPDATE_DT:           centroidal MPC update period
 PROFILE_LOG_DT:          timing summary print period
 ```
 
-`LoopProfiler` prints compact wall-clock timing summaries such as:
+`LoopProfiler` prints compact wall-clock timing summaries and real-time factor:
 
 ```text
-profile: schedule: n=... mean=...ms max=...ms | mpc: n=... | wbc: n=... | mj_step: n=... | viewer: n=...
+profile: sim=...s wall=...s rtf=... | schedule: n=... mean=...ms max=...ms | mpc: n=... | wbc: n=... | mj_step: n=... | viewer: n=...
 ```
 
 This tells us whether viewer slowness is coming from MPC, WBC, MuJoCo stepping,

@@ -34,6 +34,7 @@ class CrawlGaitConfig:
     support_centroid_ratio: float = 0.85
     command: CrawlCommand | None = None
     max_step_length: float = 0.04
+    command_velocity_ref_scale: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -304,9 +305,9 @@ class CrawlGaitPlanner:
         return delta
 
     def cycle_duration(self) -> float:
-        if not self.config.sequence:
+        if not self.config.foot_geoms:
             return 0.0
-        return len(self.config.sequence) * (self.config.swing_duration + self.config.swing_gap)
+        return len(self.config.foot_geoms) * (self.config.swing_duration + self.config.swing_gap)
 
     def _limit_planar_delta(self, delta: Array) -> None:
         planar_norm = float(np.linalg.norm(delta[0:2]))
@@ -377,13 +378,20 @@ class CrawlGaitPlanner:
 
         com_position_ref = np.asarray(home_com_ref, dtype=float).copy()
         com_position_ref[0:2] += body_xy_ref - np.asarray(nominal_body_xy, dtype=float)
+        com_velocity_ref = self.command_velocity_ref()
 
         return ReferenceBundle(
             base_position_ref=base_position_ref,
             base_orientation_ref=base_orientation_ref,
             com_position_ref=com_position_ref,
-            com_velocity_ref=np.zeros(3, dtype=float),
+            com_velocity_ref=com_velocity_ref,
         )
+
+    def command_velocity_ref(self) -> Array:
+        command = self.config.command
+        if command is None:
+            return np.zeros(3, dtype=float)
+        return self.config.command_velocity_ref_scale * np.array([command.vx, command.vy, 0.0], dtype=float)
 
     def swing_reference(
         self,
@@ -432,3 +440,5 @@ class CrawlGaitPlanner:
             raise ValueError(f"step_delta must have shape (3,), got {step_delta.shape}")
         if cfg.max_step_length <= 0.0:
             raise ValueError("max_step_length must be positive")
+        if cfg.command_velocity_ref_scale < 0.0:
+            raise ValueError("command_velocity_ref_scale must be non-negative")
