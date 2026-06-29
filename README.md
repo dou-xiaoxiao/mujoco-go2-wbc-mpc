@@ -142,6 +142,17 @@ This tells us whether viewer slowness is coming from MPC, WBC, MuJoCo stepping,
 viewer sync, or intentional sleep. Physics still steps at the MuJoCo timestep;
 between WBC updates the viewer holds the last solved torque command.
 
+QP solver reuse status:
+
+```text
+CentroidalMPC:  first call OSQP setup, later calls update q/l/u/Ax and warm start
+StanceWBCQP:    first call OSQP setup, later calls update q/l/u/Ax and warm start
+SwingWBCQP:     still rebuilds the QP each solve, because its Hessian contains J_sw^T J_sw
+```
+
+The swing WBC can be optimized later by explicitly fixing the Hessian sparsity
+pattern and updating the upper-triangular `P` values.
+
 ## Go2 Dynamics Milestone
 
 Robot model:

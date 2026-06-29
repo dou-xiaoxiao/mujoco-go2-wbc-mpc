@@ -12,6 +12,7 @@ can stack this same wrench map over a horizon and add COM dynamics.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import osqp
@@ -248,6 +249,9 @@ class CentroidalMPC:
 
     def __init__(self, config: CentroidalMPCConfig | None = None):
         self.config = config or CentroidalMPCConfig()
+        self._solver: osqp.OSQP | None = None
+        self._problem_shape: tuple[int, int, int] | None = None
+        self._last_solution: Array | None = None
 
     def solve(
         self,
@@ -341,20 +345,7 @@ class CentroidalMPC:
         l = np.concatenate([l_dyn, l_force])
         u = np.concatenate([u_dyn, u_force])
 
-        solver = osqp.OSQP()
-        solver.setup(
-            P=p,
-            q=q,
-            A=a,
-            l=l,
-            u=u,
-            verbose=False,
-            polish=True,
-            eps_abs=1.0e-7,
-            eps_rel=1.0e-7,
-            max_iter=10000,
-        )
-        result = solver.solve()
+        result = self._solve_osqp(p, q, a, l, u)
 
         z = np.zeros(nvar, dtype=float) if result.x is None else result.x
         states = z[:n_state_vars].reshape(n_steps + 1, nx)
@@ -381,6 +372,58 @@ class CentroidalMPC:
             objective=float(result.info.obj_val),
             dynamics_residual=dynamics_residual,
         )
+
+    def _solve_osqp(
+        self,
+        p: sparse.csc_matrix,
+        q: Array,
+        a: sparse.csc_matrix,
+        l: Array,
+        u: Array,
+    ) -> Any:
+        shape = (p.shape[0], a.shape[0], a.nnz)
+        if self._solver is None or self._problem_shape != shape:
+            self._solver = osqp.OSQP()
+            self._solver.setup(
+                P=p,
+                q=q,
+                A=a,
+                l=l,
+                u=u,
+                verbose=False,
+                polish=True,
+                warm_starting=True,
+                eps_abs=1.0e-7,
+                eps_rel=1.0e-7,
+                max_iter=10000,
+            )
+            self._problem_shape = shape
+        else:
+            try:
+                self._solver.update(q=q, l=l, u=u, Ax=a.data)
+            except ValueError:
+                self._solver = osqp.OSQP()
+                self._solver.setup(
+                    P=p,
+                    q=q,
+                    A=a,
+                    l=l,
+                    u=u,
+                    verbose=False,
+                    polish=True,
+                    warm_starting=True,
+                    eps_abs=1.0e-7,
+                    eps_rel=1.0e-7,
+                    max_iter=10000,
+                )
+                self._problem_shape = shape
+
+        if self._last_solution is not None and self._last_solution.shape == q.shape:
+            self._solver.warm_start(x=self._last_solution)
+        result = self._solver.solve()
+        if result.x is not None:
+            self._last_solution = result.x.copy()
+        return result
 
     def _add_state_tracking_cost(
         self,
@@ -538,41 +581,33 @@ class CentroidalMPC:
                 fy = base + 1
                 fz = base + 2
 
-                if not contact_schedule[step, contact]:
-                    for axis_col in (fx, fy, fz):
-                        add(axis_col, 1.0)
-                        lower.append(0.0)
-                        upper.append(0.0)
-                        row += 1
-                    continue
-
                 add(fx, 1.0)
                 add(fz, -mu)
-                lower.append(-np.inf)
+                lower.append(0.0 if not contact_schedule[step, contact] else -np.inf)
                 upper.append(0.0)
                 row += 1
 
                 add(fx, -1.0)
                 add(fz, -mu)
-                lower.append(-np.inf)
+                lower.append(0.0 if not contact_schedule[step, contact] else -np.inf)
                 upper.append(0.0)
                 row += 1
 
                 add(fy, 1.0)
                 add(fz, -mu)
-                lower.append(-np.inf)
+                lower.append(0.0 if not contact_schedule[step, contact] else -np.inf)
                 upper.append(0.0)
                 row += 1
 
                 add(fy, -1.0)
                 add(fz, -mu)
-                lower.append(-np.inf)
+                lower.append(0.0 if not contact_schedule[step, contact] else -np.inf)
                 upper.append(0.0)
                 row += 1
 
                 add(fz, 1.0)
-                lower.append(normal_force_min)
-                upper.append(np.inf)
+                lower.append(0.0 if not contact_schedule[step, contact] else normal_force_min)
+                upper.append(0.0 if not contact_schedule[step, contact] else np.inf)
                 row += 1
 
         amat = sparse.csc_matrix((vals, (rows, cols)), shape=(row, nvar))
