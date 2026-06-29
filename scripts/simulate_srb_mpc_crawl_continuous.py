@@ -28,6 +28,9 @@ COMMAND_VELOCITY_REF_SCALE = 1.0
 TOUCHDOWN_Z_TOL = 0.02
 TOUCHDOWN_XY_TOL = 0.025
 TOUCHDOWN_MIN_PHASE = 0.80
+SOFT_LANDING_START_PHASE = 0.95
+SOFT_LANDING_MAX_DESCENT_RATE = 0.25
+SOFT_LANDING_STOPPING_ACCEL = 1.0
 MPC_NORMAL_FORCE_MIN = 5.0
 MPC_UPDATE_DT = 0.03
 PRE_SHIFT_TIME = 0.6
@@ -202,13 +205,23 @@ def main() -> None:
                 duration=swing_duration,
                 time_s=sim_time,
             )
-            target_pos = ref.position
-            solution = swing_controllers[foot].solve(
-                robot,
-                qpos_ref,
+            swing_phase = (sim_time - start_time) / swing_duration
+            swing_pos_ref, swing_vel_ref, swing_acc_ref = soft_landing_reference(
                 ref.position,
                 ref.velocity,
                 ref.acceleration,
+                robot.geom_position(foot),
+                foothold_planner.target_for_window(window_id),
+                swing_phase,
+                dt,
+            )
+            target_pos = swing_pos_ref
+            solution = swing_controllers[foot].solve(
+                robot,
+                qpos_ref,
+                swing_pos_ref,
+                swing_vel_ref,
+                swing_acc_ref,
                 force_ref=force_ref_for_stance_feet(mpc_force_ref, foot),
                 stance_pos_refs={stance_foot: foothold_planner.locked_positions[stance_foot] for stance_foot in FOOT_GEOMS if stance_foot != foot},
             )
@@ -255,6 +268,31 @@ def main() -> None:
 def force_ref_for_stance_feet(force_ref_all: np.ndarray, swing_foot: str) -> np.ndarray:
     forces = force_ref_all.reshape(len(FOOT_GEOMS), 3)
     return np.vstack([force for foot, force in zip(FOOT_GEOMS, forces) if foot != swing_foot]).reshape(-1)
+
+
+def soft_landing_reference(
+    position: np.ndarray,
+    velocity: np.ndarray,
+    acceleration: np.ndarray,
+    current_foot_position: np.ndarray,
+    target_foot_position: np.ndarray,
+    swing_phase: float,
+    control_dt: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    pos = position.copy()
+    vel = velocity.copy()
+    acc = acceleration.copy()
+    if swing_phase < SOFT_LANDING_START_PHASE:
+        return pos, vel, acc
+
+    distance_to_ground = max(float(current_foot_position[2] - target_foot_position[2]), 0.0)
+    stopping_speed = np.sqrt(2.0 * SOFT_LANDING_STOPPING_ACCEL * distance_to_ground)
+    descent_rate_limit = min(SOFT_LANDING_MAX_DESCENT_RATE, stopping_speed)
+    max_drop = descent_rate_limit * control_dt
+    pos[2] = max(pos[2], current_foot_position[2] - max_drop)
+    vel[2] = max(vel[2], -descent_rate_limit)
+    acc[2] = max(acc[2], 0.0)
+    return pos, vel, acc
 
 
 if __name__ == "__main__":
