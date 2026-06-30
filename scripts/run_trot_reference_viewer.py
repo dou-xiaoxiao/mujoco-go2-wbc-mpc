@@ -72,6 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile-dt", type=float, default=PROFILE_LOG_DT, help="Profiler print period in sim seconds.")
     parser.add_argument("--touchdown-z-tol", type=float, default=0.018, help="Foot-point z tolerance for trot touchdown.")
     parser.add_argument("--touchdown-extra-time", type=float, default=0.25, help="Maximum extra swing time while waiting for touchdown.")
+    parser.add_argument("--start-roll-tol", type=float, default=0.04, help="Maximum absolute roll before starting the next trot swing.")
+    parser.add_argument("--start-y-tol", type=float, default=0.04, help="Maximum absolute lateral base error before starting the next trot swing.")
+    parser.add_argument("--max-start-delay", type=float, default=0.50, help="Maximum delay applied to a trot swing while waiting for recovery.")
     parser.add_argument("--no-sleep", action="store_true", help="Do not sleep to match MuJoCo real-time step.")
     return parser
 
@@ -95,6 +98,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--touchdown-z-tol must be non-negative")
     if args.touchdown_extra_time < 0.0:
         raise ValueError("--touchdown-extra-time must be non-negative")
+    if args.start_roll_tol < 0.0:
+        raise ValueError("--start-roll-tol must be non-negative")
+    if args.start_y_tol < 0.0:
+        raise ValueError("--start-y-tol must be non-negative")
+    if args.max_start_delay < 0.0:
+        raise ValueError("--max-start-delay must be non-negative")
 
 
 def main() -> None:
@@ -135,6 +144,7 @@ def main() -> None:
     next_window_id = 0
     active_plans: dict[str, SwingPlan] = {}
     completed_windows: set[int] = set()
+    window_delay_used = np.zeros(len(windows), dtype=float)
     next_mpc_update = 0.0
     next_wbc_update = 0.0
     next_viewer_sync = 0.0
@@ -174,24 +184,34 @@ def main() -> None:
 
             with profiler.time("schedule"):
                 if active_window_id is None and next_window_id < len(windows) and sim_time >= windows[next_window_id].start_time:
-                    active_window_id = next_window_id
-                    window = windows[active_window_id]
-                    active_plans = {
-                        foot: SwingPlan(
-                            foot=foot,
-                            start_position=locked_positions[foot].copy(),
-                            target_position=locked_positions[foot] + foothold_delta_for_foot(
-                                foot,
-                                initial_foot_positions,
-                                nominal_step_delta,
-                                args.yaw_rate * period,
-                                args.max_step_length,
-                            ),
-                        )
-                        for foot in window.swing_feet
-                    }
-                    next_wbc_update = sim_time
-                    next_mpc_update = sim_time
+                    if should_delay_next_trot_window(
+                        robot,
+                        initial_base_pos,
+                        args.start_roll_tol,
+                        args.start_y_tol,
+                    ) and window_delay_used[next_window_id] < args.max_start_delay:
+                        delay = min(dt, args.max_start_delay - window_delay_used[next_window_id])
+                        windows = delay_trot_windows(windows, next_window_id, delay)
+                        window_delay_used[next_window_id:] += delay
+                    else:
+                        active_window_id = next_window_id
+                        window = windows[active_window_id]
+                        active_plans = {
+                            foot: SwingPlan(
+                                foot=foot,
+                                start_position=locked_positions[foot].copy(),
+                                target_position=locked_positions[foot] + foothold_delta_for_foot(
+                                    foot,
+                                    initial_foot_positions,
+                                    nominal_step_delta,
+                                    args.yaw_rate * period,
+                                    args.max_step_length,
+                                ),
+                            )
+                            for foot in window.swing_feet
+                        }
+                        next_wbc_update = sim_time
+                        next_mpc_update = sim_time
 
                 current_window = windows[active_window_id] if active_window_id is not None else None
                 if current_window is not None and should_finish_trot_window(
@@ -242,6 +262,7 @@ def main() -> None:
                     planned_foot_positions,
                     yaw=args.yaw_rate * command_time,
                 )
+                base_ref[1] = initial_base_pos[1] + args.vy * command_time
                 com_ref = home_com_ref.copy()
                 com_ref[0:2] += base_ref[0:2] - initial_base_pos[0:2]
                 com_vel_ref = np.array([args.vx, args.vy, 0.0], dtype=float)
@@ -413,6 +434,31 @@ def should_finish_trot_window(
         if not (robot.geom_has_contact(foot) or near_ground):
             return False
     return True
+
+
+def should_delay_next_trot_window(
+    robot: MuJoCoModelInterface,
+    initial_base_pos: np.ndarray,
+    roll_tol: float,
+    y_tol: float,
+) -> bool:
+    roll, _, _ = quat_to_rpy(robot.data.qpos[3:7])
+    y_error = float(robot.data.qpos[1] - initial_base_pos[1])
+    return abs(roll) > roll_tol or abs(y_error) > y_tol
+
+
+def delay_trot_windows(windows: list[TrotWindow], start_index: int, delay: float) -> list[TrotWindow]:
+    if delay <= 0.0:
+        return windows
+    shifted = list(windows)
+    for idx in range(start_index, len(shifted)):
+        window = shifted[idx]
+        shifted[idx] = TrotWindow(
+            swing_feet=window.swing_feet,
+            start_time=window.start_time + delay,
+            duration=window.duration,
+        )
+    return shifted
 
 
 def base_reference(home_qpos_ref: np.ndarray, initial_base_pos: np.ndarray, time_s: float, vx: float, vy: float, yaw_rate: float) -> np.ndarray:
