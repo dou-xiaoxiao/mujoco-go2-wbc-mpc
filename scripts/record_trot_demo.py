@@ -96,9 +96,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Record smooth MPC/WBC locomotion demos.")
     parser.add_argument(
         "--preset",
-        choices=("straight-turn", "straight", "turn-left", "forward-2m"),
+        choices=("straight-turn", "straight", "turn-left", "forward-2m", "forward-2m-smooth"),
         default="straight-turn",
-        help="Reference preset. straight/turn presets use diagonal trot; forward-2m uses stable single-leg crawl-walk.",
+        help=(
+            "Reference preset. straight/turn presets use diagonal trot; "
+            "forward-2m presets use single-leg crawl-walk."
+        ),
     )
     parser.add_argument("--states-output", type=Path, default=DEFAULT_STATES_PATH)
     parser.add_argument("--gif-output", type=Path, default=DEFAULT_GIF_PATH)
@@ -179,6 +182,8 @@ def preset_segments(name: str) -> list[CommandSegment]:
         return [CommandSegment(duration=4.8, vx=0.006, vy=0.0, yaw_rate=0.055)]
     if name == "forward-2m":
         return [CommandSegment(duration=36.0, vx=0.070, vy=0.0, yaw_rate=0.0)]
+    if name == "forward-2m-smooth":
+        return [CommandSegment(duration=36.0, vx=0.070, vy=0.0, yaw_rate=0.0)]
     if name == "straight-turn":
         return [
             CommandSegment(duration=2.4, vx=0.010, vy=0.0, yaw_rate=0.0),
@@ -188,21 +193,49 @@ def preset_segments(name: str) -> list[CommandSegment]:
 
 
 def apply_preset_defaults(args: argparse.Namespace) -> None:
-    if args.preset != "forward-2m":
+    if args.preset not in ("forward-2m", "forward-2m-smooth"):
         return
 
-    if args.swing_duration == DEFAULT_SWING_DURATION:
-        args.swing_duration = 0.18
-    if args.stance_gap == DEFAULT_STANCE_GAP:
-        args.stance_gap = 0.12
-    if args.swing_height == DEFAULT_SWING_HEIGHT:
-        args.swing_height = 0.022
-    if args.max_step_length == DEFAULT_MAX_STEP_LENGTH:
-        args.max_step_length = 0.08
-    if args.end_padding == DEFAULT_END_PADDING:
-        args.end_padding = 1.5
-    if args.playback_speed == 1.0:
-        args.playback_speed = 2.0
+    if args.preset == "forward-2m":
+        preset = {
+            "swing_duration": 0.18,
+            "stance_gap": 0.12,
+            "swing_height": 0.022,
+            "max_step_length": 0.08,
+            "end_padding": 1.5,
+            "playback_speed": 2.0,
+        }
+    else:
+        preset = {
+            "swing_duration": 0.20,
+            "stance_gap": 0.16,
+            "swing_height": 0.030,
+            "max_step_length": 0.09,
+            "end_padding": 1.5,
+            "playback_speed": 2.0,
+        }
+
+    apply_default_if_not_passed(args, "swing_duration", "--swing-duration", DEFAULT_SWING_DURATION, preset["swing_duration"])
+    apply_default_if_not_passed(args, "stance_gap", "--stance-gap", DEFAULT_STANCE_GAP, preset["stance_gap"])
+    apply_default_if_not_passed(args, "swing_height", "--swing-height", DEFAULT_SWING_HEIGHT, preset["swing_height"])
+    apply_default_if_not_passed(args, "max_step_length", "--max-step-length", DEFAULT_MAX_STEP_LENGTH, preset["max_step_length"])
+    apply_default_if_not_passed(args, "end_padding", "--end-padding", DEFAULT_END_PADDING, preset["end_padding"])
+    apply_default_if_not_passed(args, "playback_speed", "--playback-speed", 1.0, preset["playback_speed"])
+
+
+def apply_default_if_not_passed(
+    args: argparse.Namespace,
+    attr: str,
+    option: str,
+    parser_default: float,
+    preset_default: float,
+) -> None:
+    if not option_was_passed(option) and getattr(args, attr) == parser_default:
+        setattr(args, attr, preset_default)
+
+
+def option_was_passed(option: str) -> bool:
+    return any(arg == option or arg.startswith(option + "=") for arg in sys.argv[1:])
 
 
 def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -509,7 +542,7 @@ def build_demo_windows(
 
 
 def preset_swing_sets(preset: str) -> tuple[tuple[str, ...], ...]:
-    if preset == "forward-2m":
+    if preset in ("forward-2m", "forward-2m-smooth"):
         return (("FL",), ("RR",), ("FR",), ("RL",))
     return trot.TROT_PAIRS
 
@@ -685,6 +718,9 @@ def prepare_output_path(path: Path) -> Path:
     resolved = absolute_output_path(path)
     try:
         resolved.parent.mkdir(parents=True, exist_ok=True)
+        probe = resolved.parent / f".write_test_{resolved.name}.tmp"
+        probe.write_bytes(b"")
+        probe.unlink()
         return resolved
     except OSError as exc:
         fallback = Path(tempfile.gettempdir()) / "mujoco_wbc_project" / resolved.name

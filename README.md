@@ -141,6 +141,12 @@ Longer forward walking demo:
 It is meant for showing that the MPC/WBC stack can follow a long foothold
 sequence and then stand without the live viewer stuttering.
 
+Smoother two-meter version with higher swing clearance and longer steps:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\record_trot_demo.py --preset forward-2m-smooth --no-gif --viewer-replay
+```
+
 Inspect which upstream gait/contact references the current WBC can execute:
 
 ```powershell
