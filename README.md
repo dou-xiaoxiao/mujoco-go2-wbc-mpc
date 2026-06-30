@@ -147,6 +147,15 @@ Smoother two-meter version with higher swing clearance and longer steps:
 .\.venv\Scripts\python.exe .\scripts\record_trot_demo.py --preset forward-2m-smooth --no-gif --viewer-replay
 ```
 
+Diagonal-pair trot route demo: straight, left turn, straight.
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\record_trot_demo.py --preset trot-l-route --no-gif --viewer-replay
+```
+
+This preset uses diagonal swing pairs with short all-stance recovery gaps. It is
+a conservative route-following trot demo, not a fast continuous running trot.
+
 Inspect which upstream gait/contact references the current WBC can execute:
 
 ```powershell

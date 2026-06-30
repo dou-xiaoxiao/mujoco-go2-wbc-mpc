@@ -96,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Record smooth MPC/WBC locomotion demos.")
     parser.add_argument(
         "--preset",
-        choices=("straight-turn", "straight", "turn-left", "forward-2m", "forward-2m-smooth"),
+        choices=("straight-turn", "straight", "turn-left", "forward-2m", "forward-2m-smooth", "trot-l-route"),
         default="straight-turn",
         help=(
             "Reference preset. straight/turn presets use diagonal trot; "
@@ -184,6 +184,17 @@ def preset_segments(name: str) -> list[CommandSegment]:
         return [CommandSegment(duration=36.0, vx=0.070, vy=0.0, yaw_rate=0.0)]
     if name == "forward-2m-smooth":
         return [CommandSegment(duration=36.0, vx=0.070, vy=0.0, yaw_rate=0.0)]
+    if name == "trot-l-route":
+        return [
+            CommandSegment(duration=37.5, vx=0.040, vy=0.0, yaw_rate=0.0),
+            CommandSegment(duration=20.0, vx=0.004, vy=0.0, yaw_rate=np.pi / 40.0),
+            CommandSegment(duration=3.0, vx=0.0, vy=0.0, yaw_rate=0.0),
+            CommandSegment(duration=13.0, vx=0.040, vy=0.0, yaw_rate=0.0),
+            CommandSegment(duration=3.0, vx=0.0, vy=0.0, yaw_rate=0.0),
+            CommandSegment(duration=13.0, vx=0.040, vy=0.0, yaw_rate=0.0),
+            CommandSegment(duration=3.0, vx=0.0, vy=0.0, yaw_rate=0.0),
+            CommandSegment(duration=13.0, vx=0.040, vy=0.0, yaw_rate=0.0),
+        ]
     if name == "straight-turn":
         return [
             CommandSegment(duration=2.4, vx=0.010, vy=0.0, yaw_rate=0.0),
@@ -193,7 +204,7 @@ def preset_segments(name: str) -> list[CommandSegment]:
 
 
 def apply_preset_defaults(args: argparse.Namespace) -> None:
-    if args.preset not in ("forward-2m", "forward-2m-smooth"):
+    if args.preset not in ("forward-2m", "forward-2m-smooth", "trot-l-route"):
         return
 
     if args.preset == "forward-2m":
@@ -205,7 +216,7 @@ def apply_preset_defaults(args: argparse.Namespace) -> None:
             "end_padding": 1.5,
             "playback_speed": 2.0,
         }
-    else:
+    elif args.preset == "forward-2m-smooth":
         preset = {
             "swing_duration": 0.20,
             "stance_gap": 0.16,
@@ -213,6 +224,15 @@ def apply_preset_defaults(args: argparse.Namespace) -> None:
             "max_step_length": 0.09,
             "end_padding": 1.5,
             "playback_speed": 2.0,
+        }
+    else:
+        preset = {
+            "swing_duration": 0.20,
+            "stance_gap": 0.45,
+            "swing_height": 0.035,
+            "max_step_length": 0.045,
+            "end_padding": 0.0,
+            "playback_speed": 4.0,
         }
 
     apply_default_if_not_passed(args, "swing_duration", "--swing-duration", DEFAULT_SWING_DURATION, preset["swing_duration"])
@@ -320,10 +340,11 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
         sim_time = float(robot.data.time)
 
         if active_window_id is None and next_window_id < len(windows) and sim_time >= windows[next_window_id].start_time:
+            _, ref_y_for_delay, _ = integrated_command_pose(segments, max(0.0, sim_time - args.settle_time))
             if (
-                trot.should_delay_next_trot_window(
+                should_delay_next_demo_window(
                     robot,
-                    initial_base_pos,
+                    initial_base_pos[1] + ref_y_for_delay,
                     args.start_roll_tol,
                     args.start_y_tol,
                 )
@@ -385,8 +406,10 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
                 for foot, plan in active_plans.items()
             }
 
-        command = command_at_time(segments, max(0.0, sim_time - args.settle_time))
-        ref_x, ref_y, ref_yaw = integrated_command_pose(segments, max(0.0, sim_time - args.settle_time))
+        command_time = max(0.0, sim_time - args.settle_time)
+        command = command_at_time(segments, command_time)
+        ref_x, ref_y, ref_yaw = integrated_command_pose(segments, command_time)
+        com_vel_ref = command_velocity_world(segments, command_time)
         contact_schedule = demo_contact_schedule(
             windows,
             sim_time,
@@ -407,7 +430,6 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
 
         com_ref = home_com_ref.copy()
         com_ref[0:2] += base_ref[0:2] - initial_base_pos[0:2]
-        com_vel_ref = np.array([command.vx, command.vy, 0.0], dtype=float)
         orientation_ref = np.array([0.0, 0.0, ref_yaw], dtype=float)
         angular_velocity_ref = np.array([0.0, 0.0, command.yaw_rate], dtype=float)
 
@@ -521,9 +543,16 @@ def build_demo_windows(
     start_time = settle_time
     idx = 0
     while start_time < settle_time + total_command_time:
-        command = command_at_time(segments, start_time - settle_time)
+        command_time = start_time - settle_time
+        command = command_at_time(segments, command_time)
+        _, _, yaw = integrated_command_pose(segments, command_time)
+        if is_zero_command(command):
+            start_time += stride
+            idx += 1
+            continue
+        planar_step = rotate_yaw(yaw) @ np.array([command.vx * foot_period, command.vy * foot_period], dtype=float)
         step_delta = trot.limited_planar_delta(
-            np.array([command.vx * foot_period, command.vy * foot_period, 0.0], dtype=float),
+            np.array([planar_step[0], planar_step[1], 0.0], dtype=float),
             max_step_length,
         )
         yaw_delta = command.yaw_rate * foot_period
@@ -541,10 +570,25 @@ def build_demo_windows(
     return windows
 
 
+def is_zero_command(command: CommandSegment) -> bool:
+    return abs(command.vx) < 1.0e-12 and abs(command.vy) < 1.0e-12 and abs(command.yaw_rate) < 1.0e-12
+
+
 def preset_swing_sets(preset: str) -> tuple[tuple[str, ...], ...]:
     if preset in ("forward-2m", "forward-2m-smooth"):
         return (("FL",), ("RR",), ("FR",), ("RL",))
     return trot.TROT_PAIRS
+
+
+def should_delay_next_demo_window(
+    robot: MuJoCoModelInterface,
+    y_ref: float,
+    roll_tol: float,
+    y_tol: float,
+) -> bool:
+    roll, _, _ = trot.quat_to_rpy(robot.data.qpos[3:7])
+    y_error = float(robot.data.qpos[1] - y_ref)
+    return abs(roll) > roll_tol or abs(y_error) > y_tol
 
 
 def demo_contact_schedule(
@@ -602,11 +646,25 @@ def integrated_command_pose(segments: list[CommandSegment], time_s: float) -> tu
         dt = min(remaining, segment.duration)
         if dt <= 0.0:
             break
-        x += segment.vx * dt
-        y += segment.vy * dt
+        velocity_world = rotate_yaw(yaw) @ np.array([segment.vx, segment.vy], dtype=float)
+        x += velocity_world[0] * dt
+        y += velocity_world[1] * dt
         yaw += segment.yaw_rate * dt
         remaining -= dt
     return x, y, yaw
+
+
+def command_velocity_world(segments: list[CommandSegment], time_s: float) -> np.ndarray:
+    _, _, yaw = integrated_command_pose(segments, time_s)
+    command = command_at_time(segments, time_s)
+    planar = rotate_yaw(yaw) @ np.array([command.vx, command.vy], dtype=float)
+    return np.array([planar[0], planar[1], 0.0], dtype=float)
+
+
+def rotate_yaw(yaw: float) -> np.ndarray:
+    c = float(np.cos(yaw))
+    s = float(np.sin(yaw))
+    return np.array([[c, -s], [s, c]], dtype=float)
 
 
 def foothold_delta_from_layout(
