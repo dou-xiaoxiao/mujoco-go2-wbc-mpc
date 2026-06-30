@@ -53,30 +53,30 @@ with WBC decision variables:
 vdot, tau, f
 ```
 
-## Current Scripts
+## Current Entry Points
+
+Read the project map first if you are trying to understand the code layout:
+
+```text
+docs/project_structure.md
+```
+
+Useful runnable entry points:
 
 ```text
 scripts/check_mujoco_install.py
 scripts/inspect_go2_dynamics.py
 scripts/inspect_frame_conventions.py
+scripts/validate_control_stack.py
 scripts/run_static_stance_once.py
-scripts/simulate_static_stance.py
 scripts/run_static_stance_viewer.py
-scripts/run_centroidal_mpc_once.py
-scripts/run_centroidal_mpc_horizon_once.py
-scripts/run_centroidal_to_wbc_once.py
-scripts/run_horizon_mpc_to_wbc_once.py
-scripts/inspect_contact_schedule.py
-scripts/simulate_srb_mpc_forward_step.py
-scripts/run_srb_mpc_forward_step_viewer.py
-scripts/simulate_srb_mpc_crawl.py
 scripts/run_single_leg_swing_once.py
-scripts/simulate_single_leg_swing.py
 scripts/run_single_leg_swing_viewer.py
-scripts/simulate_single_leg_forward_step.py
-scripts/run_single_leg_forward_step_viewer.py
-scripts/simulate_step_sequence.py
-scripts/run_step_sequence_viewer.py
+scripts/run_centroidal_mpc_once.py
+scripts/run_centroidal_to_wbc_once.py
+scripts/run_commanded_crawl_viewer.py
+scripts/run_trot_reference_viewer.py
+scripts/debug_trot_headless.py
 ```
 
 Verifies that MuJoCo imports and exposes mass matrix, Jacobian, and inverse
@@ -108,6 +108,7 @@ Control stack notes:
 
 ```text
 docs/mainline_architecture.md
+docs/project_structure.md
 docs/control_stack.md
 docs/locomotion_reference_map.md
 docs/external_reference_sources.md
