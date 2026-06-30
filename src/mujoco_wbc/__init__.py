@@ -15,6 +15,12 @@ from .contact_schedule import (
     scheduled_swing_contacts,
     single_leg_swing_schedule,
 )
+from .contact_transition import (
+    landing_force_zero_weights,
+    landing_ramped_force_ref,
+    smoothstep01,
+    update_touchdown_hysteresis,
+)
 from .model_interface import MuJoCoModelInterface
 from .planning import (
     BodyReferencePlanner,
@@ -88,7 +94,11 @@ __all__ = [
     "scheduled_swing_contacts",
     "single_leg_swing_schedule",
     "smoothstep",
+    "smoothstep01",
     "support_centroid",
+    "landing_force_zero_weights",
+    "landing_ramped_force_ref",
     "swing_foothold_reference",
+    "update_touchdown_hysteresis",
     "validate_reference_frame",
 ]

@@ -21,9 +21,10 @@ class StanceWBCConfig:
     friction_mu: float = 0.6
     normal_force_min: float = 0.0
     weight_base_pos: float = 100.0
-    weight_base_ori: float = 100.0
-    weight_joint_posture: float = 10.0
+    weight_base_ori: float = 180.0
+    weight_joint_posture: float = 12.0
     weight_tau: float = 1.0e-4
+    weight_tau_rate: float = 0.0
     weight_force: float = 1.0e-3
     kp_base_pos: float = 100.0
     kd_base_pos: float = 20.0
@@ -55,9 +56,10 @@ class SingleLegSwingWBCConfig:
     normal_force_min: float = 5.0
     weight_base_pos: float = 120.0
     weight_base_ori: float = 120.0
-    weight_joint_posture: float = 6.0
+    weight_joint_posture: float = 8.0
     weight_swing_foot: float = 800.0
     weight_tau: float = 1.0e-4
+    weight_tau_rate: float = 0.0
     weight_force: float = 1.0e-3
     kp_base_pos: float = 120.0
     kd_base_pos: float = 24.0
@@ -85,9 +87,10 @@ class GeneralContactWBCConfig:
     normal_force_min: float = 5.0
     weight_base_pos: float = 120.0
     weight_base_ori: float = 120.0
-    weight_joint_posture: float = 6.0
+    weight_joint_posture: float = 8.0
     weight_swing_foot: float = 800.0
     weight_tau: float = 1.0e-4
+    weight_tau_rate: float = 0.0
     weight_force: float = 1.0e-3
     kp_base_pos: float = 120.0
     kd_base_pos: float = 24.0
@@ -177,6 +180,10 @@ class StanceWBCQP:
         self._add_diagonal_tracking_cost(p_diag, q, slice(6, nv), cfg.weight_joint_posture, joint_acc_cmd)
 
         p_diag[idx_tau] += cfg.weight_tau
+        previous_tau = previous_tau_from_solution(self._last_solution, nv, nu)
+        if cfg.weight_tau_rate > 0.0 and previous_tau is not None:
+            p_diag[idx_tau] += cfg.weight_tau_rate
+            q[idx_tau] += -cfg.weight_tau_rate * previous_tau
         p_diag[idx_force] += cfg.weight_force + force_zero_weights
         q[idx_force] += -cfg.weight_force * force_ref
 
@@ -467,6 +474,10 @@ class SingleLegSwingWBCQP:
         self._add_diagonal_tracking_cost(p, q, slice(6, nv), cfg.weight_joint_posture, joint_acc_cmd)
 
         p[idx_tau, idx_tau] = p[idx_tau, idx_tau] + sparse.eye(nu, format="lil") * cfg.weight_tau
+        previous_tau = previous_tau_from_solution(self._last_solution, nv, nu)
+        if cfg.weight_tau_rate > 0.0 and previous_tau is not None:
+            p[idx_tau, idx_tau] = p[idx_tau, idx_tau] + sparse.eye(nu, format="lil") * cfg.weight_tau_rate
+            q[idx_tau] += -cfg.weight_tau_rate * previous_tau
         p[idx_force, idx_force] = p[idx_force, idx_force] + sparse.diags(
             cfg.weight_force + force_zero_weights,
             format="lil",
@@ -708,6 +719,10 @@ class GeneralContactWBCQP:
         self._add_diagonal_tracking_cost(p, q, slice(6, nv), cfg.weight_joint_posture, joint_acc_cmd)
 
         p[idx_tau, idx_tau] = p[idx_tau, idx_tau] + sparse.eye(nu, format="lil") * cfg.weight_tau
+        previous_tau = previous_tau_from_solution(self._last_solution, nv, nu)
+        if cfg.weight_tau_rate > 0.0 and previous_tau is not None:
+            p[idx_tau, idx_tau] = p[idx_tau, idx_tau] + sparse.eye(nu, format="lil") * cfg.weight_tau_rate
+            q[idx_tau] += -cfg.weight_tau_rate * previous_tau
         p[idx_force, idx_force] = p[idx_force, idx_force] + sparse.diags(
             cfg.weight_force + force_zero_weights,
             format="lil",
@@ -901,6 +916,14 @@ def quat_error_rotvec(desired: Array, current: Array) -> Array:
     if error[0] < 0.0:
         error = -error
     return 2.0 * error[1:4]
+
+
+def previous_tau_from_solution(last_solution: Array | None, nv: int, nu: int) -> Array | None:
+    if last_solution is None:
+        return None
+    if last_solution.shape[0] < nv + nu:
+        return None
+    return last_solution[nv : nv + nu].copy()
 
 
 def normalize_quat(quat: Array) -> Array:
