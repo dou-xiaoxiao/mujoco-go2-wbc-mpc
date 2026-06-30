@@ -631,6 +631,11 @@ class SingleLegSwingWBCQP:
 class GeneralContactWBCQP:
     """Full-body WBC for arbitrary non-flight contact modes.
 
+    中文说明：
+        这是当前 locomotion 主链路使用的通用 WBC。stance feet 作为硬接触
+        约束进入 QP，swing feet 作为软足端加速度任务进入 cost。QP 在完整
+        floating-base 动力学约束下求解 [vdot, tau, f]。
+
     This is the contact-mode generic version of the current WBC:
 
         stance_feet -> hard contact acceleration constraints and contact forces

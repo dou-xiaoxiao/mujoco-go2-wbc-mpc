@@ -228,6 +228,11 @@ class CentroidalForceQP:
 class CentroidalMPC:
     """Linear SRB MPC with per-foot contact forces and a fixed contact schedule.
 
+    中文说明：
+        这一层不是完整机器人动力学，而是 single-rigid-body / centroidal
+        近似。它在预测窗口内优化 COM 状态和四条腿的接触力，输出当前时刻
+        的每足接触力参考给 WBC。
+
     State:
 
         x = [com_position_W, com_velocity_W, theta_W, omega_W]

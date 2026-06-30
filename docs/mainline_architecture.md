@@ -1,292 +1,125 @@
-# MPC/WBC Mainline Architecture
+# Mainline Architecture
 
-This file is the short map of the current project. It deliberately ignores
-most tuning details and keeps only the control pipeline:
-
-```text
-MuJoCo robot state
-  -> planner / references
-  -> centroidal SRB-MPC
-  -> full-body WBC QP
-  -> joint torques
-  -> MuJoCo simulation
-```
-
-## 1. Robot State and Dynamics
-
-Owner:
+项目主链路：
 
 ```text
-src/mujoco_wbc/model_interface.py
+MuJoCo Go2 state
+    -> reference / contact schedule
+    -> SRB-MPC
+    -> full-body WBC QP
+    -> joint torque
+    -> MuJoCo step
 ```
 
-State:
+## Data Flow
 
 ```text
-qpos[0:3] = base position in world
-qpos[3:7] = base quaternion [w, x, y, z]
-qpos[7:]  = 12 joint positions
+MuJoCoModelInterface
+    reads qpos, qvel, contacts
+    computes M, h, B, J, Jdot*v, COM, inertia
 
-qvel[0:3] = base linear velocity in world
-qvel[3:6] = base angular velocity in world
-qvel[6:]  = 12 joint velocities
+Reference layer
+    provides COM/base references
+    provides stance/swing schedule
+    provides swing foot trajectories
+
+CentroidalMPC
+    optimizes horizon COM state and foot forces
+    outputs current per-foot force reference
+
+GeneralContactWBCQP
+    enforces full-body dynamics
+    enforces stance acceleration constraints
+    tracks swing foot acceleration tasks
+    tracks MPC force reference as a soft cost
+    outputs joint torque tau
 ```
 
-It provides the data needed by WBC:
+## Main Demo Path
+
+The clean public demo is:
 
 ```text
-M(q)
-h(q, v)
-B
-J_foot(q)
-Jdot_foot(q, v) v
-base orientation R_WB
-COM position / velocity
-composite inertia
-foot contact-point positions
+scripts/record_trot_demo.py --preset trot-l-route
 ```
 
-The key convention is:
+It runs the controller headlessly and stores `qpos/qvel`, then replays or renders
+the stored motion. This separates controller computation speed from visual playback
+smoothness.
+
+Current route:
 
 ```text
-v_foot = J_foot(q) v
-a_foot = J_foot(q) vdot + Jdot_foot(q, v) v
-generalized contact force = J_foot(q)^T f_foot
+straight
+left turn
+short recovery pauses
+straight
 ```
 
-No IK is in the main locomotion chain. Foot tasks are expressed directly as
-task-space acceleration tasks through the Jacobian.
-
-## 2. Planner and References
-
-Owner:
+Current gait mode:
 
 ```text
-src/mujoco_wbc/planning.py
-src/mujoco_wbc/contact_schedule.py
-src/mujoco_wbc/swing_trajectory.py
+diagonal trot contact schedule
 ```
 
-Human/task input:
+Current limitation:
 
 ```text
-CrawlCommand(vx, vy, yaw_rate)
+The route is scripted and conservative. It demonstrates the MPC/WBC stack, not a
+production gait planner.
 ```
 
-Planner outputs:
+## Why MPC and WBC Are Both Present
+
+MPC sees a simplified centroidal model:
 
 ```text
-contact schedule over the MPC horizon
-which foot is swing at the current time
-swing foot start position
-swing foot target foothold
-swing foot position / velocity / acceleration reference
-base position / orientation reference for WBC
-COM position / velocity reference for MPC
+state   = [com_pos, com_vel, theta, omega]
+control = per-foot contact forces
 ```
 
-Important distinction:
+It is good at choosing contact forces over a prediction horizon.
+
+WBC sees the full floating-base dynamics:
 
 ```text
-foothold target -> consumed by swing trajectory and WBC swing task
-COM reference   -> consumed by MPC
-base reference  -> consumed by WBC
+M(q) vdot + h(q,v) = B tau + J_c(q)^T f
 ```
 
-The current planner is intentionally simple. It converts command velocity into
-a small world-frame foothold delta, then biases the body reference toward the
-upcoming support set. This is the upper layer that is still least mature.
+It is good at turning references and contact forces into physically feasible
+joint torques under stance, friction, and actuator constraints.
 
-## 3. Centroidal SRB-MPC
-
-Owner:
+So the split is:
 
 ```text
-src/mujoco_wbc/centroidal_mpc.py
+MPC: plan centroidal motion and contact force reference
+WBC: realize that reference using the full robot dynamics
 ```
 
-SRB means single rigid body. The MPC does not optimize the full 18-velocity
-floating-base dynamics. It uses a centroidal approximation:
+## Current Research Boundary
+
+This repository is currently an optimization-control locomotion project.
+
+In scope:
 
 ```text
-state x = [com_pos, com_vel, theta, omega]
-input u = [f_FL, f_FR, f_RL, f_RR]
+MuJoCo model interface
+SRB-MPC
+full-body WBC
+contact schedules
+scripted stance/swing references
+stable replay demos
 ```
 
-Decision variable:
+Out of scope for the current stable branch:
 
 ```text
-all states over the horizon
-all four foot-force vectors over the horizon
+large-scale RL
+Isaac Lab training
+hardware deployment
+terrain perception
+fast dynamic gait optimization
 ```
 
-Dynamics constraints:
-
-```text
-p[k+1]     = p[k] + dt v[k]
-v[k+1]     = v[k] + dt (sum_i f_i[k] / mass + gravity)
-theta[k+1] = theta[k] + dt omega[k]
-omega[k+1] = omega[k] + dt I_world^-1 sum_i (p_i - com) x f_i[k]
-```
-
-Contact constraints:
-
-```text
-stance foot: friction pyramid and fz >= 0
-swing foot:  f = 0
-```
-
-Cost:
-
-```text
-track COM position reference
-track COM velocity reference
-keep small orientation error
-keep small angular velocity
-regularize contact forces
-```
-
-Output to WBC:
-
-```text
-current-knot per-foot contact force reference
-```
-
-This force is a reference, not a torque command. MPC says what contact forces
-would produce a good centroidal motion under the simplified model.
-
-## 4. Full-Body WBC QP
-
-Owner:
-
-```text
-src/mujoco_wbc/wbc_qp.py
-```
-
-Decision variable:
-
-```text
-z = [vdot, tau, f]
-```
-
-where:
-
-```text
-vdot = generalized acceleration, R^18
-tau  = 12 joint torques
-f    = stance foot contact forces
-```
-
-Hard dynamics constraint:
-
-```text
-M(q) vdot + h(q, v) = B tau + J_c(q)^T f
-```
-
-Hard stance-foot acceleration constraint:
-
-```text
-J_c vdot + Jdot_c v = a_c_cmd
-```
-
-For a normal locked stance foot:
-
-```text
-a_c_cmd = kp (p_ref - p_foot) + kd (0 - v_foot)
-```
-
-Swing-foot soft task:
-
-```text
-J_sw vdot + Jdot_sw v ~= xddot_ref
-```
-
-Force and actuator constraints:
-
-```text
-|fx| <= mu fz
-|fy| <= mu fz
-fz >= 0
-tau_min <= tau <= tau_max
-```
-
-Cost:
-
-```text
-track base position/orientation acceleration task
-track nominal joint posture
-track swing foot acceleration task when a foot is swinging
-track MPC contact-force reference
-regularize torques
-regularize contact forces during landing load transfer
-```
-
-Output:
-
-```text
-tau
-```
-
-WBC is the layer that makes the MPC force reference physically compatible with
-the real floating-base dynamics, stance constraints, friction constraints, and
-torque limits.
-
-## 5. Contact Mode Changes
-
-Four-foot stance:
-
-```text
-MPC: all four feet may generate force
-WBC: all four feet are stance constraints
-```
-
-One-foot swing:
-
-```text
-MPC: swing foot force is constrained to zero over knots where it is swing
-WBC: swing foot is removed from contact constraints and added as a swing task
-```
-
-After touchdown:
-
-```text
-planner locks the new foothold
-MPC allows that foot to generate force again
-WBC puts that foot back into stance
-landing load transfer ramps the newly touched foot force in smoothly
-```
-
-The recent touchdown and load-transfer code is engineering around this mode
-switch. It is not a new control layer.
-
-## 6. What Is Done vs Not Done
-
-Done enough for the current milestone:
-
-```text
-MuJoCo Go2 floating-base model interface
-full-body WBC dynamics QP
-single-leg swing WBC without IK
-generic non-flight contact-mode WBC for crawl/trot-like references
-SRB-MPC force references
-time-varying contact schedule over the MPC horizon
-continuous crawl demo path in the viewer
-QP solver reuse for MPC, stance WBC, and swing WBC
-basic profiler for viewer / MPC / WBC timing
-```
-
-Still experimental:
-
-```text
-foothold quality
-body / COM reference quality
-touchdown smoothness
-turning and lateral walking
-faster real-time performance
-trot or dynamic gaits
-hardware estimator / IMU / state-estimation interface
-```
-
-The next useful project step is not more hidden tuning. It is to make the demo
-entry point cleaner, expose command parameters clearly, and then improve the
-planner/reference layer in small visible increments.
+These can be future extensions once the current MPC/WBC project is packaged and
+explained clearly.

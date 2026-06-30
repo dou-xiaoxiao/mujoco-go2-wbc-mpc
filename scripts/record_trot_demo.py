@@ -297,6 +297,8 @@ def option_was_passed(option: str) -> bool:
 
 
 def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    # 这个函数是真正的闭环控制 rollout：
+    # MuJoCo state -> reference/contact schedule -> MPC force -> WBC torque -> mj_step.
     robot = MuJoCoModelInterface(MODEL_PATH)
     robot.set_keyframe("home")
 
@@ -307,6 +309,8 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
     initial_foot_positions = {foot: robot.geom_position(foot) for foot in foot_geoms}
     locked_positions = {foot: pos.copy() for foot, pos in initial_foot_positions.items()}
 
+    # DemoWindow 表示“哪几条腿在什么时间 swing，以及它们要走多远”。
+    # trot-l-route 使用对角腿对；forward-2m 使用单腿 crawl 顺序。
     windows = build_demo_windows(
         args.preset,
         segments,
@@ -377,6 +381,8 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
     while robot.data.time < end_time:
         sim_time = float(robot.data.time)
 
+        # 到达下一个 swing window 时，锁定 swing 起点并生成目标落脚点。
+        # locked_positions 是 planner 眼里的 stance 足端位置，不直接用瞬时接触点漂移。
         if active_window_id is None and next_window_id < len(windows) and sim_time >= windows[next_window_id].start_time:
             _, ref_y_for_delay, _ = integrated_command_pose(segments, max(0.0, sim_time - args.settle_time))
             if (
@@ -419,6 +425,7 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
                 next_mpc_update = sim_time
 
         current_window = windows[active_window_id] if active_window_id is not None else None
+        # touchdown 后把目标落脚点重新锁成 stance 位置，并强制 MPC/WBC 下一拍刷新接触模式。
         if current_window is not None and trot.should_finish_trot_window(
             robot,
             current_window,
@@ -436,6 +443,8 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
             next_wbc_update = sim_time
             next_mpc_update = sim_time
 
+        # swing reference 是任务空间轨迹：位置、速度、加速度。
+        # WBC 不走 IK，而是通过 J_sw vdot + Jdot*v 跟踪这个足端加速度任务。
         swing_refs = {}
         if current_window is not None:
             swing_refs = {
@@ -477,6 +486,7 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
         orientation_ref = np.array([0.0, 0.0, ref_yaw], dtype=float)
         angular_velocity_ref = np.array([0.0, 0.0, command.yaw_rate], dtype=float)
 
+        # MPC 频率低于 MuJoCo timestep。两次 MPC 之间沿用上一拍接触力参考。
         if sim_time >= next_mpc_update:
             mpc_solution = mpc.solve(
                 robot,
@@ -492,6 +502,7 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
                 solve_failures += 1
             next_mpc_update += args.mpc_dt
 
+        # WBC 输出关节力矩 tau。两次 WBC 之间保持上一拍 tau。
         if sim_time >= next_wbc_update:
             if current_window is None:
                 solution = stance_controller.solve(
@@ -724,6 +735,9 @@ def lateral_width_regulated_foothold(
     correction: float,
     margin: float,
 ) -> np.ndarray:
+    # 转弯后最容易出现脚向外/向内越走越偏。
+    # 这里把目标脚点转到当前 base yaw 下的 body frame，只修正横向宽度误差，
+    # 不直接改前进方向，因此它是一个很保守的 foothold 修正。
     start = locked_positions[foot]
     target = start + foothold_delta_from_layout(
         foot,
