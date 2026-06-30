@@ -298,7 +298,7 @@ class CentroidalMPC:
             [
                 com,
                 robot.base_linear_velocity(),
-                np.zeros(3, dtype=float),
+                quat_to_rpy(robot.data.qpos[3:7]),
                 robot.base_angular_velocity(),
             ]
         )
@@ -667,3 +667,14 @@ def skew(vector: Array) -> Array:
         ],
         dtype=float,
     )
+
+
+def quat_to_rpy(quat: Array) -> Array:
+    """Return roll, pitch, yaw for a MuJoCo wxyz quaternion."""
+
+    w, x, y, z = np.asarray(quat, dtype=float)
+    roll = np.arctan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
+    sin_pitch = 2.0 * (w * y - z * x)
+    pitch = np.arcsin(np.clip(sin_pitch, -1.0, 1.0))
+    yaw = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    return np.array([roll, pitch, yaw], dtype=float)

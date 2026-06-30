@@ -64,9 +64,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vy", type=float, default=0.0, help="Lateral velocity command in m/s.")
     parser.add_argument("--yaw-rate", type=float, default=0.0, help="Yaw rate command in rad/s.")
     parser.add_argument("--cycles", type=int, default=6, help="Number of two-phase trot cycles.")
-    parser.add_argument("--swing-duration", type=float, default=0.55, help="Diagonal pair swing duration in seconds.")
-    parser.add_argument("--stance-gap", type=float, default=0.20, help="All-stance gap between diagonal swings.")
-    parser.add_argument("--swing-height", type=float, default=0.035, help="Swing clearance in meters.")
+    parser.add_argument("--swing-duration", type=float, default=0.35, help="Diagonal pair swing duration in seconds.")
+    parser.add_argument("--stance-gap", type=float, default=0.30, help="All-stance gap between diagonal swings.")
+    parser.add_argument("--swing-height", type=float, default=0.025, help="Swing clearance in meters.")
     parser.add_argument("--max-step-length", type=float, default=0.035, help="Planar foothold delta limit in meters.")
     parser.add_argument("--viewer-hz", type=float, default=60.0, help="Viewer sync rate. Use 0 to sync every step.")
     parser.add_argument("--profile-dt", type=float, default=PROFILE_LOG_DT, help="Profiler print period in sim seconds.")
@@ -132,6 +132,8 @@ def main() -> None:
         horizon_steps=12,
         dt=0.03,
         normal_force_min=MPC_NORMAL_FORCE_MIN,
+        weight_orientation=1200.0,
+        weight_angular_velocity=100.0,
     )
     mpc = CentroidalMPC(mpc_config)
     stance_controller = StanceWBCQP(
@@ -301,8 +303,11 @@ def main() -> None:
                                     normal_force_min=MPC_NORMAL_FORCE_MIN,
                                     weight_swing_foot=1400.0,
                                     weight_force=1.0,
+                                    weight_base_ori=300.0,
                                     kp_swing=450.0,
                                     kd_swing=42.0,
+                                    kp_base_ori=240.0,
+                                    kd_base_ori=40.0,
                                     kp_stance=100.0,
                                     kd_stance=20.0,
                                 )

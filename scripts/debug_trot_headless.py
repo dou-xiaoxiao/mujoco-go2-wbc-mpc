@@ -58,9 +58,9 @@ def main() -> None:
     vx = 0.012
     vy = 0.0
     yaw_rate = 0.0
-    swing_duration = 0.55
-    stance_gap = 0.20
-    swing_height = 0.035
+    swing_duration = 0.35
+    stance_gap = 0.30
+    swing_height = 0.025
     max_step_length = 0.035
 
     home_qpos_ref = robot.q.copy()
@@ -91,6 +91,8 @@ def main() -> None:
         horizon_steps=12,
         dt=0.03,
         normal_force_min=trot.MPC_NORMAL_FORCE_MIN,
+        weight_orientation=1200.0,
+        weight_angular_velocity=100.0,
     )
     mpc = CentroidalMPC(mpc_config)
     stance_controller = StanceWBCQP(
@@ -237,8 +239,11 @@ def main() -> None:
                             normal_force_min=trot.MPC_NORMAL_FORCE_MIN,
                             weight_swing_foot=1400.0,
                             weight_force=1.0,
+                            weight_base_ori=300.0,
                             kp_swing=450.0,
                             kd_swing=42.0,
+                            kp_base_ori=240.0,
+                            kd_base_ori=40.0,
                             kp_stance=100.0,
                             kd_stance=20.0,
                         )
