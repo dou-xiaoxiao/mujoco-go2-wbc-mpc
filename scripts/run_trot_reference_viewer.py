@@ -70,6 +70,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-step-length", type=float, default=0.035, help="Planar foothold delta limit in meters.")
     parser.add_argument("--viewer-hz", type=float, default=60.0, help="Viewer sync rate. Use 0 to sync every step.")
     parser.add_argument("--profile-dt", type=float, default=PROFILE_LOG_DT, help="Profiler print period in sim seconds.")
+    parser.add_argument("--touchdown-z-tol", type=float, default=0.018, help="Foot-point z tolerance for trot touchdown.")
+    parser.add_argument("--touchdown-extra-time", type=float, default=0.25, help="Maximum extra swing time while waiting for touchdown.")
     parser.add_argument("--no-sleep", action="store_true", help="Do not sleep to match MuJoCo real-time step.")
     return parser
 
@@ -89,6 +91,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--viewer-hz must be non-negative")
     if args.profile_dt < 0.0:
         raise ValueError("--profile-dt must be non-negative")
+    if args.touchdown_z_tol < 0.0:
+        raise ValueError("--touchdown-z-tol must be non-negative")
+    if args.touchdown_extra_time < 0.0:
+        raise ValueError("--touchdown-extra-time must be non-negative")
 
 
 def main() -> None:
@@ -140,6 +146,10 @@ def main() -> None:
     mpc_force_ref = np.zeros(3 * len(FOOT_GEOMS))
     mpc_status = "not run"
     mpc_residual = 0.0
+    solve_failures = 0
+    last_dyn_residual = 0.0
+    last_stance_residual = 0.0
+    last_swing_error = 0.0
     profiler = LoopProfiler()
     profile_wall_start = time.perf_counter()
     profile_sim_start = 0.0
@@ -155,6 +165,7 @@ def main() -> None:
             args.stance_gap,
         )
     )
+    command_start_time = windows[0].start_time if windows else 0.0
 
     with mujoco.viewer.launch_passive(robot.model, robot.data) as viewer:
         while viewer.is_running():
@@ -180,9 +191,17 @@ def main() -> None:
                         for foot in window.swing_feet
                     }
                     next_wbc_update = sim_time
+                    next_mpc_update = sim_time
 
                 current_window = windows[active_window_id] if active_window_id is not None else None
-                if current_window is not None and sim_time >= current_window.end_time:
+                if current_window is not None and should_finish_trot_window(
+                    robot,
+                    current_window,
+                    active_plans,
+                    sim_time,
+                    args.touchdown_z_tol,
+                    args.touchdown_extra_time,
+                ):
                     for foot in current_window.swing_feet:
                         locked_positions[foot] = robot.geom_position(foot).copy()
                     completed_windows.add(active_window_id)
@@ -191,9 +210,38 @@ def main() -> None:
                     active_plans = {}
                     current_window = None
                     next_wbc_update = sim_time
+                    next_mpc_update = sim_time
 
-                contact_schedule = trot_contact_schedule(windows, sim_time, mpc_config.horizon_steps, mpc_config.dt)
-                base_ref = base_reference(home_qpos_ref, initial_base_pos, sim_time, args.vx, args.vy, args.yaw_rate)
+                swing_refs = {}
+                if current_window is not None:
+                    swing_refs = {
+                        foot: swing_foothold_reference(
+                            initial_position=plan.start_position,
+                            step_delta=plan.target_position - plan.start_position,
+                            swing_height=args.swing_height,
+                            start_time=current_window.start_time,
+                            duration=current_window.duration,
+                            time_s=sim_time,
+                        )
+                        for foot, plan in active_plans.items()
+                    }
+
+                contact_schedule = trot_contact_schedule(
+                    windows,
+                    sim_time,
+                    mpc_config.horizon_steps,
+                    mpc_config.dt,
+                    active_window=current_window,
+                )
+                command_time = max(0.0, sim_time - command_start_time)
+                planned_foot_positions = planned_feet_from_refs(locked_positions, swing_refs)
+                base_ref = foot_centered_base_reference(
+                    home_qpos_ref,
+                    initial_base_pos,
+                    initial_foot_positions,
+                    planned_foot_positions,
+                    yaw=args.yaw_rate * command_time,
+                )
                 com_ref = home_com_ref.copy()
                 com_ref[0:2] += base_ref[0:2] - initial_base_pos[0:2]
                 com_vel_ref = np.array([args.vx, args.vy, 0.0], dtype=float)
@@ -238,23 +286,12 @@ def main() -> None:
                                     kd_stance=20.0,
                                 )
                             )
-                        refs = {
-                            foot: swing_foothold_reference(
-                                initial_position=plan.start_position,
-                                step_delta=plan.target_position - plan.start_position,
-                                swing_height=args.swing_height,
-                                start_time=current_window.start_time,
-                                duration=current_window.duration,
-                                time_s=sim_time,
-                            )
-                            for foot, plan in active_plans.items()
-                        }
                         solution = generic_controllers[key].solve(
                             robot,
                             base_ref,
-                            swing_pos_refs={foot: ref.position for foot, ref in refs.items()},
-                            swing_vel_refs={foot: ref.velocity for foot, ref in refs.items()},
-                            swing_acc_refs={foot: ref.acceleration for foot, ref in refs.items()},
+                            swing_pos_refs={foot: ref.position for foot, ref in swing_refs.items()},
+                            swing_vel_refs={foot: ref.velocity for foot, ref in swing_refs.items()},
+                            swing_acc_refs={foot: ref.acceleration for foot, ref in swing_refs.items()},
                             force_ref=force_ref_for_feet(mpc_force_ref, stance_feet),
                             stance_pos_refs={foot: locked_positions[foot] for foot in stance_feet},
                         )
@@ -262,8 +299,11 @@ def main() -> None:
                     last_wbc_status = solution.status
                     if solution.status in ("solved", "solved inaccurate") and mpc_status in ("solved", "solved inaccurate"):
                         last_tau = solution.tau.copy()
+                        last_dyn_residual = float(np.linalg.norm(solution.dynamics_residual))
+                        last_stance_residual = float(np.linalg.norm(solution.stance_residual))
+                        last_swing_error = float(np.linalg.norm(getattr(solution, "swing_accel_error", np.zeros(0))))
                     else:
-                        last_tau = np.zeros(robot.nu)
+                        solve_failures += 1
                     last_max_tau = float(np.max(np.abs(last_tau)))
                 next_wbc_update += WBC_UPDATE_DT
 
@@ -278,15 +318,24 @@ def main() -> None:
 
             if robot.data.time >= next_log_time:
                 phase = "stance" if current_window is None else "+".join(current_window.swing_feet) + "-swing"
+                roll, pitch, yaw = quat_to_rpy(robot.data.qpos[3:7])
+                contacts = "".join("1" if robot.geom_has_contact(foot) else "0" for foot in FOOT_GEOMS)
+                fz = mpc_force_ref.reshape(len(FOOT_GEOMS), 3)[:, 2]
                 print(
-                    "t={:.2f}s phase={} step={}/{} base={} disp={} tau={:.2f} mpc={} wbc={} mpc_res={:.1e}".format(
+                    "t={:.2f}s phase={} step={}/{} base={} rpy={} contacts={} fz={} tau={:.2f} res=[{:.1e},{:.1e},{:.1e}] fails={} mpc={} wbc={} mpc_res={:.1e}".format(
                         robot.data.time,
                         phase,
                         min(next_window_id, len(windows)),
                         len(windows),
                         np.round(robot.data.qpos[0:3], 4).tolist(),
-                        np.round(robot.data.qpos[0:3] - initial_base_pos, 4).tolist(),
+                        np.round([roll, pitch, yaw], 3).tolist(),
+                        contacts,
+                        np.round(fz, 1).tolist(),
                         last_max_tau,
+                        last_dyn_residual,
+                        last_stance_residual,
+                        last_swing_error,
+                        solve_failures,
                         mpc_status,
                         last_wbc_status,
                         mpc_residual,
@@ -322,7 +371,13 @@ def build_trot_windows(cycles: int, swing_duration: float, stance_gap: float) ->
     return windows
 
 
-def trot_contact_schedule(windows: list[TrotWindow], current_time: float, horizon_steps: int, dt: float) -> np.ndarray:
+def trot_contact_schedule(
+    windows: list[TrotWindow],
+    current_time: float,
+    horizon_steps: int,
+    dt: float,
+    active_window: TrotWindow | None = None,
+) -> np.ndarray:
     schedule = np.ones((horizon_steps, len(FOOT_GEOMS)), dtype=bool)
     foot_to_index = {foot: idx for idx, foot in enumerate(FOOT_GEOMS)}
     for step in range(horizon_steps):
@@ -331,7 +386,33 @@ def trot_contact_schedule(windows: list[TrotWindow], current_time: float, horizo
             if window.start_time <= knot_time < window.end_time:
                 for foot in window.swing_feet:
                     schedule[step, foot_to_index[foot]] = False
+        if active_window is not None:
+            for foot in active_window.swing_feet:
+                schedule[step, foot_to_index[foot]] = False
     return schedule
+
+
+def should_finish_trot_window(
+    robot: MuJoCoModelInterface,
+    window: TrotWindow,
+    active_plans: dict[str, SwingPlan],
+    time_s: float,
+    touchdown_z_tol: float,
+    touchdown_extra_time: float,
+) -> bool:
+    if time_s < window.end_time:
+        return False
+    if time_s >= window.end_time + touchdown_extra_time:
+        return True
+
+    for foot in window.swing_feet:
+        plan = active_plans[foot]
+        foot_pos = robot.geom_position(foot)
+        target_pos = plan.target_position
+        near_ground = foot_pos[2] <= target_pos[2] + touchdown_z_tol
+        if not (robot.geom_has_contact(foot) or near_ground):
+            return False
+    return True
 
 
 def base_reference(home_qpos_ref: np.ndarray, initial_base_pos: np.ndarray, time_s: float, vx: float, vy: float, yaw_rate: float) -> np.ndarray:
@@ -342,9 +423,50 @@ def base_reference(home_qpos_ref: np.ndarray, initial_base_pos: np.ndarray, time
     return qpos_ref
 
 
+def planned_feet_from_refs(
+    locked_positions: dict[str, np.ndarray],
+    swing_refs: dict[str, object],
+) -> dict[str, np.ndarray]:
+    planned = {foot: pos.copy() for foot, pos in locked_positions.items()}
+    for foot, ref in swing_refs.items():
+        planned[foot] = ref.position.copy()
+    return planned
+
+
+def foot_centered_base_reference(
+    home_qpos_ref: np.ndarray,
+    initial_base_pos: np.ndarray,
+    initial_foot_positions: dict[str, np.ndarray],
+    planned_foot_positions: dict[str, np.ndarray],
+    yaw: float,
+) -> np.ndarray:
+    qpos_ref = home_qpos_ref.copy()
+    foot_delta_xy = np.mean(
+        np.vstack(
+            [
+                planned_foot_positions[foot][0:2] - initial_foot_positions[foot][0:2]
+                for foot in FOOT_GEOMS
+            ]
+        ),
+        axis=0,
+    )
+    qpos_ref[0:2] = initial_base_pos[0:2] + foot_delta_xy
+    qpos_ref[3:7] = yaw_quat(yaw)
+    return qpos_ref
+
+
 def yaw_quat(yaw: float) -> np.ndarray:
     half = 0.5 * yaw
     return np.array([np.cos(half), 0.0, 0.0, np.sin(half)], dtype=float)
+
+
+def quat_to_rpy(quat: np.ndarray) -> tuple[float, float, float]:
+    w, x, y, z = np.asarray(quat, dtype=float)
+    roll = np.arctan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
+    sin_pitch = 2.0 * (w * y - z * x)
+    pitch = np.arcsin(np.clip(sin_pitch, -1.0, 1.0))
+    yaw = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    return float(roll), float(pitch), float(yaw)
 
 
 def foothold_delta_for_foot(
