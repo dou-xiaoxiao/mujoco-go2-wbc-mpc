@@ -33,6 +33,7 @@ class StanceWBCConfig:
     kd_joint: float = 8.0
     kp_stance: float = 0.0
     kd_stance: float = 0.0
+    use_jdot_v: bool = True
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,7 @@ class SingleLegSwingWBCConfig:
     kd_swing: float = 40.0
     kp_stance: float = 0.0
     kd_stance: float = 0.0
+    use_jdot_v: bool = True
 
 
 @dataclass(frozen=True)
@@ -97,6 +99,7 @@ class GeneralContactWBCConfig:
     kd_swing: float = 40.0
     kp_stance: float = 0.0
     kd_stance: float = 0.0
+    use_jdot_v: bool = True
 
 
 @dataclass(frozen=True)
@@ -149,7 +152,11 @@ class StanceWBCQP:
         h = robot.bias_forces()
         bmat = robot.actuation_matrix()
         jc = robot.stacked_geom_jacobian(list(cfg.foot_geoms))
-        jdot_v = robot.stacked_geom_jdot_v(list(cfg.foot_geoms))
+        jdot_v = (
+            robot.stacked_geom_jdot_v(list(cfg.foot_geoms))
+            if cfg.use_jdot_v
+            else np.zeros(nf, dtype=float)
+        )
         stance_acc_cmd = self._stance_accel_cmd(robot, list(cfg.foot_geoms), stance_pos_refs)
 
         pos_acc_cmd = self._base_position_accel_cmd(robot, qpos_ref)
@@ -420,7 +427,11 @@ class SingleLegSwingWBCQP:
         h = robot.bias_forces()
         bmat = robot.actuation_matrix()
         jc = robot.stacked_geom_jacobian(list(cfg.stance_foot_geoms))
-        jdot_v = robot.stacked_geom_jdot_v(list(cfg.stance_foot_geoms))
+        jdot_v = (
+            robot.stacked_geom_jdot_v(list(cfg.stance_foot_geoms))
+            if cfg.use_jdot_v
+            else np.zeros(nf, dtype=float)
+        )
         stance_acc_cmd = self._stance_accel_cmd(robot, list(cfg.stance_foot_geoms), stance_pos_refs)
 
         pos_acc_cmd = self._base_position_accel_cmd(robot, qpos_ref)
@@ -438,7 +449,7 @@ class SingleLegSwingWBCQP:
             raise ValueError(f"force_zero_weights must have shape ({nf},), got {force_zero_weights.shape}")
 
         swing_j = robot.geom_jacobian(cfg.swing_foot_geom).jacp
-        swing_jdot_v = robot.geom_jdot_v(cfg.swing_foot_geom)
+        swing_jdot_v = robot.geom_jdot_v(cfg.swing_foot_geom) if cfg.use_jdot_v else np.zeros(3, dtype=float)
         swing_pos = robot.geom_position(cfg.swing_foot_geom)
         swing_vel = robot.geom_velocity(cfg.swing_foot_geom)
         swing_acc_cmd = (
@@ -668,7 +679,11 @@ class GeneralContactWBCQP:
         h = robot.bias_forces()
         bmat = robot.actuation_matrix()
         jc = robot.stacked_geom_jacobian(list(cfg.stance_foot_geoms))
-        jdot_v = robot.stacked_geom_jdot_v(list(cfg.stance_foot_geoms))
+        jdot_v = (
+            robot.stacked_geom_jdot_v(list(cfg.stance_foot_geoms))
+            if cfg.use_jdot_v
+            else np.zeros(nf, dtype=float)
+        )
         stance_acc_cmd = self._stance_accel_cmd(robot, list(cfg.stance_foot_geoms), stance_pos_refs)
 
         pos_acc_cmd = self._base_position_accel_cmd(robot, qpos_ref)
@@ -705,7 +720,7 @@ class GeneralContactWBCQP:
             swing_vel_ref = np.asarray(swing_vel_refs.get(foot, np.zeros(3)), dtype=float)
             swing_acc_ref = np.asarray(swing_acc_refs.get(foot, np.zeros(3)), dtype=float)
             swing_j = robot.geom_jacobian(foot).jacp
-            swing_jdot_v = robot.geom_jdot_v(foot)
+            swing_jdot_v = robot.geom_jdot_v(foot) if cfg.use_jdot_v else np.zeros(3, dtype=float)
             swing_pos = robot.geom_position(foot)
             swing_vel = robot.geom_velocity(foot)
             swing_acc_cmd = (

@@ -41,6 +41,7 @@ class MuJoCoModelInterface:
         self.data = mujoco.MjData(self.model)
         self.base_body_name = BASE_BODY_NAME
         self.base_body_id = self._body_id(self.base_body_name)
+        self._actuation_matrix_cache: Array | None = None
         mujoco.mj_forward(self.model, self.data)
 
     @property
@@ -101,6 +102,9 @@ class MuJoCoModelInterface:
     def actuation_matrix(self) -> Array:
         """Return B such that qfrc_actuator = B tau for unit motor controls."""
 
+        if self._actuation_matrix_cache is not None:
+            return self._actuation_matrix_cache.copy()
+
         original_ctrl = self.data.ctrl.copy()
         original_qacc = self.data.qacc.copy()
         matrix = np.zeros((self.nv, self.nu), dtype=float)
@@ -117,6 +121,7 @@ class MuJoCoModelInterface:
         self.data.ctrl[:] = original_ctrl
         self.data.qacc[:] = original_qacc
         mujoco.mj_forward(self.model, self.data)
+        self._actuation_matrix_cache = matrix.copy()
         return matrix
 
     def actuator_forces(self) -> Array:

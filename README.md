@@ -146,6 +146,14 @@ Run a diagonal-pair trot reference through the generic contact-mode WBC:
 .\.venv\Scripts\python.exe .\scripts\run_trot_reference_viewer.py --vx 0.008 --yaw-rate 0.04
 ```
 
+For a faster viewer demo, lower solve/display rates or skip the finite-difference
+`Jdot*v` term:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\run_trot_reference_viewer.py --vx 0.012 --viewer-hz 30 --wbc-dt 0.012 --mpc-dt 0.06
+.\.venv\Scripts\python.exe .\scripts\run_trot_reference_viewer.py --vx 0.012 --ignore-jdot-v
+```
+
 The continuous crawl scripts are command-driven:
 
 ```text
