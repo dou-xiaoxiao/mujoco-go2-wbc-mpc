@@ -153,8 +153,9 @@ Diagonal-pair trot route demo: straight, left turn, straight.
 .\.venv\Scripts\python.exe .\scripts\record_trot_demo.py --preset trot-l-route --no-gif --viewer-replay
 ```
 
-This preset uses diagonal swing pairs with short all-stance recovery gaps. It is
-a conservative route-following trot demo, not a fast continuous running trot.
+This preset uses diagonal swing pairs, short all-stance recovery gaps, and
+body-frame lateral foothold-width regulation. It is a conservative
+route-following trot demo, not a fast continuous running trot.
 
 Inspect which upstream gait/contact references the current WBC can execute:
 
