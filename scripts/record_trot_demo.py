@@ -35,6 +35,8 @@ DEFAULT_SWING_DURATION = 0.28
 DEFAULT_STANCE_GAP = 0.52
 DEFAULT_SWING_HEIGHT = 0.018
 DEFAULT_MAX_STEP_LENGTH = 0.026
+DEFAULT_LATERAL_FOOT_WIDTH_CORRECTION = 0.0
+DEFAULT_LATERAL_FOOT_WIDTH_MARGIN = 0.04
 
 sys.path.insert(0, str(SRC_ROOT))
 
@@ -117,6 +119,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stance-gap", type=float, default=DEFAULT_STANCE_GAP)
     parser.add_argument("--swing-height", type=float, default=DEFAULT_SWING_HEIGHT)
     parser.add_argument("--max-step-length", type=float, default=DEFAULT_MAX_STEP_LENGTH)
+    parser.add_argument(
+        "--lateral-foot-width-correction",
+        type=float,
+        default=DEFAULT_LATERAL_FOOT_WIDTH_CORRECTION,
+        help="Blend swing targets back toward the nominal body-frame lateral foot offset.",
+    )
+    parser.add_argument(
+        "--lateral-foot-width-margin",
+        type=float,
+        default=DEFAULT_LATERAL_FOOT_WIDTH_MARGIN,
+        help="Allowed body-frame lateral foot offset error before correction is applied.",
+    )
     parser.add_argument("--mpc-dt", type=float, default=trot.MPC_UPDATE_DT)
     parser.add_argument("--wbc-dt", type=float, default=trot.WBC_UPDATE_DT)
     parser.add_argument("--log-dt", type=float, default=0.5)
@@ -148,6 +162,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--swing-height must be non-negative")
     if args.max_step_length <= 0.0:
         raise ValueError("--max-step-length must be positive")
+    if not 0.0 <= args.lateral_foot_width_correction <= 1.0:
+        raise ValueError("--lateral-foot-width-correction must be in [0, 1]")
+    if args.lateral_foot_width_margin < 0.0:
+        raise ValueError("--lateral-foot-width-margin must be non-negative")
     if args.mpc_dt <= 0.0:
         raise ValueError("--mpc-dt must be positive")
     if args.wbc_dt <= 0.0:
@@ -213,6 +231,8 @@ def apply_preset_defaults(args: argparse.Namespace) -> None:
             "stance_gap": 0.12,
             "swing_height": 0.022,
             "max_step_length": 0.08,
+            "lateral_foot_width_correction": 0.0,
+            "lateral_foot_width_margin": DEFAULT_LATERAL_FOOT_WIDTH_MARGIN,
             "end_padding": 1.5,
             "playback_speed": 2.0,
         }
@@ -222,6 +242,8 @@ def apply_preset_defaults(args: argparse.Namespace) -> None:
             "stance_gap": 0.16,
             "swing_height": 0.030,
             "max_step_length": 0.09,
+            "lateral_foot_width_correction": 0.0,
+            "lateral_foot_width_margin": DEFAULT_LATERAL_FOOT_WIDTH_MARGIN,
             "end_padding": 1.5,
             "playback_speed": 2.0,
         }
@@ -231,6 +253,8 @@ def apply_preset_defaults(args: argparse.Namespace) -> None:
             "stance_gap": 0.45,
             "swing_height": 0.035,
             "max_step_length": 0.045,
+            "lateral_foot_width_correction": 0.35,
+            "lateral_foot_width_margin": 0.025,
             "end_padding": 0.0,
             "playback_speed": 4.0,
         }
@@ -239,6 +263,20 @@ def apply_preset_defaults(args: argparse.Namespace) -> None:
     apply_default_if_not_passed(args, "stance_gap", "--stance-gap", DEFAULT_STANCE_GAP, preset["stance_gap"])
     apply_default_if_not_passed(args, "swing_height", "--swing-height", DEFAULT_SWING_HEIGHT, preset["swing_height"])
     apply_default_if_not_passed(args, "max_step_length", "--max-step-length", DEFAULT_MAX_STEP_LENGTH, preset["max_step_length"])
+    apply_default_if_not_passed(
+        args,
+        "lateral_foot_width_correction",
+        "--lateral-foot-width-correction",
+        DEFAULT_LATERAL_FOOT_WIDTH_CORRECTION,
+        preset["lateral_foot_width_correction"],
+    )
+    apply_default_if_not_passed(
+        args,
+        "lateral_foot_width_margin",
+        "--lateral-foot-width-margin",
+        DEFAULT_LATERAL_FOOT_WIDTH_MARGIN,
+        preset["lateral_foot_width_margin"],
+    )
     apply_default_if_not_passed(args, "end_padding", "--end-padding", DEFAULT_END_PADDING, preset["end_padding"])
     apply_default_if_not_passed(args, "playback_speed", "--playback-speed", 1.0, preset["playback_speed"])
 
@@ -356,17 +394,23 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
             else:
                 active_window_id = next_window_id
                 window = windows[active_window_id]
+                base_yaw_for_foothold = trot.quat_to_rpy(robot.data.qpos[3:7])[2]
                 active_plans = {
                     foot: SwingPlan(
                         foot=foot,
                         start_position=locked_positions[foot].copy(),
-                        target_position=locked_positions[foot]
-                        + foothold_delta_from_layout(
+                        target_position=lateral_width_regulated_foothold(
                             foot,
                             locked_positions,
+                            robot.data.qpos[0:3],
+                            base_yaw_for_foothold,
+                            initial_base_pos,
+                            initial_foot_positions,
                             window.step_delta,
                             window.yaw_delta,
                             args.max_step_length,
+                            args.lateral_foot_width_correction,
+                            args.lateral_foot_width_margin,
                         ),
                     )
                     for foot in window.swing_feet
@@ -665,6 +709,54 @@ def rotate_yaw(yaw: float) -> np.ndarray:
     c = float(np.cos(yaw))
     s = float(np.sin(yaw))
     return np.array([[c, -s], [s, c]], dtype=float)
+
+
+def lateral_width_regulated_foothold(
+    foot: str,
+    locked_positions: dict[str, np.ndarray],
+    base_position: np.ndarray,
+    base_yaw: float,
+    initial_base_pos: np.ndarray,
+    initial_foot_positions: dict[str, np.ndarray],
+    step_delta: np.ndarray,
+    yaw_delta: float,
+    max_step_length: float,
+    correction: float,
+    margin: float,
+) -> np.ndarray:
+    start = locked_positions[foot]
+    target = start + foothold_delta_from_layout(
+        foot,
+        locked_positions,
+        step_delta,
+        yaw_delta,
+        max_step_length,
+    )
+    if correction <= 0.0:
+        return target
+
+    rotation_world_from_base = rotate_yaw(base_yaw)
+    nominal_offset_base = initial_foot_positions[foot][0:2] - initial_base_pos[0:2]
+    target_offset_base = rotation_world_from_base.T @ (target[0:2] - np.asarray(base_position[0:2], dtype=float))
+    lateral_error = target_offset_base[1] - nominal_offset_base[1]
+    if abs(lateral_error) <= margin:
+        return target
+
+    corrected_offset_base = target_offset_base.copy()
+    corrected_offset_base[1] -= float(correction) * (lateral_error - np.sign(lateral_error) * margin)
+    corrected_xy = np.asarray(base_position[0:2], dtype=float) + rotation_world_from_base @ corrected_offset_base
+
+    regulated = target.copy()
+    regulated[0:2] = clamp_planar_step(start[0:2], corrected_xy, max_step_length)
+    return regulated
+
+
+def clamp_planar_step(start_xy: np.ndarray, target_xy: np.ndarray, max_step_length: float) -> np.ndarray:
+    delta = np.asarray(target_xy, dtype=float) - np.asarray(start_xy, dtype=float)
+    norm = float(np.linalg.norm(delta))
+    if norm <= max_step_length:
+        return np.asarray(target_xy, dtype=float).copy()
+    return np.asarray(start_xy, dtype=float) + delta * (max_step_length / norm)
 
 
 def foothold_delta_from_layout(
