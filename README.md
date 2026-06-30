@@ -131,6 +131,16 @@ This runs the MPC/WBC controller headlessly, stores the simulated states, then
 renders a fixed-rate GIF. Add `--viewer-replay` to replay the stored states in a
 MuJoCo viewer without solving QPs during playback.
 
+Longer forward walking demo:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\record_trot_demo.py --preset forward-2m --no-gif --viewer-replay
+```
+
+`forward-2m` uses a stable single-leg crawl-walk sequence, not diagonal trot.
+It is meant for showing that the MPC/WBC stack can follow a long foothold
+sequence and then stand without the live viewer stuttering.
+
 Inspect which upstream gait/contact references the current WBC can execute:
 
 ```powershell

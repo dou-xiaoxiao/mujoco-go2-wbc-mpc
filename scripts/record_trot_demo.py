@@ -1,4 +1,4 @@
-"""Generate a smooth trot demo by offline rollout, then 60 Hz replay/render.
+"""Generate smooth locomotion demos by offline rollout, then 60 Hz replay/render.
 
 The live viewer scripts solve MPC/WBC in the same loop that draws frames. If
 the QP stack is slower than real time, the visual result looks choppy even when
@@ -29,6 +29,12 @@ SRC_ROOT = PROJECT_ROOT / "src"
 MODEL_PATH = PROJECT_ROOT / "models" / "mujoco_menagerie" / "unitree_go2" / "scene.xml"
 DEFAULT_STATES_PATH = PROJECT_ROOT / "outputs" / "trot_straight_turn_demo.npz"
 DEFAULT_GIF_PATH = PROJECT_ROOT / "outputs" / "trot_straight_turn_demo.gif"
+DEFAULT_SETTLE_TIME = 0.8
+DEFAULT_END_PADDING = 0.8
+DEFAULT_SWING_DURATION = 0.28
+DEFAULT_STANCE_GAP = 0.52
+DEFAULT_SWING_HEIGHT = 0.018
+DEFAULT_MAX_STEP_LENGTH = 0.026
 
 sys.path.insert(0, str(SRC_ROOT))
 
@@ -68,7 +74,7 @@ class CommandSegment:
 
 @dataclass(frozen=True)
 class DemoWindow:
-    swing_feet: tuple[str, str]
+    swing_feet: tuple[str, ...]
     start_time: float
     duration: float
     step_delta: np.ndarray
@@ -87,26 +93,27 @@ class SwingPlan:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Record a smooth straight+turn trot demo.")
+    parser = argparse.ArgumentParser(description="Record smooth MPC/WBC locomotion demos.")
     parser.add_argument(
         "--preset",
-        choices=("straight-turn", "straight", "turn-left"),
+        choices=("straight-turn", "straight", "turn-left", "forward-2m"),
         default="straight-turn",
-        help="Reference preset to roll out.",
+        help="Reference preset. straight/turn presets use diagonal trot; forward-2m uses stable single-leg crawl-walk.",
     )
     parser.add_argument("--states-output", type=Path, default=DEFAULT_STATES_PATH)
     parser.add_argument("--gif-output", type=Path, default=DEFAULT_GIF_PATH)
     parser.add_argument("--no-gif", action="store_true", help="Only save the qpos/qvel rollout.")
     parser.add_argument("--viewer-replay", action="store_true", help="Replay stored states in the MuJoCo viewer.")
     parser.add_argument("--fps", type=float, default=60.0, help="Visual sample/replay/render frame rate.")
+    parser.add_argument("--playback-speed", type=float, default=1.0, help="Replay/render speed multiplier for stored states.")
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=360)
-    parser.add_argument("--settle-time", type=float, default=0.8)
-    parser.add_argument("--end-padding", type=float, default=0.8)
-    parser.add_argument("--swing-duration", type=float, default=0.28)
-    parser.add_argument("--stance-gap", type=float, default=0.52)
-    parser.add_argument("--swing-height", type=float, default=0.018)
-    parser.add_argument("--max-step-length", type=float, default=0.026)
+    parser.add_argument("--settle-time", type=float, default=DEFAULT_SETTLE_TIME)
+    parser.add_argument("--end-padding", type=float, default=DEFAULT_END_PADDING)
+    parser.add_argument("--swing-duration", type=float, default=DEFAULT_SWING_DURATION)
+    parser.add_argument("--stance-gap", type=float, default=DEFAULT_STANCE_GAP)
+    parser.add_argument("--swing-height", type=float, default=DEFAULT_SWING_HEIGHT)
+    parser.add_argument("--max-step-length", type=float, default=DEFAULT_MAX_STEP_LENGTH)
     parser.add_argument("--mpc-dt", type=float, default=trot.MPC_UPDATE_DT)
     parser.add_argument("--wbc-dt", type=float, default=trot.WBC_UPDATE_DT)
     parser.add_argument("--log-dt", type=float, default=0.5)
@@ -122,6 +129,8 @@ def build_parser() -> argparse.ArgumentParser:
 def validate_args(args: argparse.Namespace) -> None:
     if args.fps <= 0.0:
         raise ValueError("--fps must be positive")
+    if args.playback_speed <= 0.0:
+        raise ValueError("--playback-speed must be positive")
     if args.width <= 0 or args.height <= 0:
         raise ValueError("--width and --height must be positive")
     if args.settle_time < 0.0:
@@ -144,6 +153,7 @@ def validate_args(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = build_parser().parse_args()
+    apply_preset_defaults(args)
     validate_args(args)
 
     segments = preset_segments(args.preset)
@@ -155,11 +165,11 @@ def main() -> None:
     print(f"saved rollout: {states_path} ({len(times)} frames at {args.fps:.1f} Hz)")
 
     if not args.no_gif:
-        render_gif(states_path, gif_path, args.width, args.height, args.fps)
+        render_gif(states_path, gif_path, args.width, args.height, args.fps, args.playback_speed)
         print(f"saved gif: {gif_path}")
 
     if args.viewer_replay:
-        replay_viewer(states_path, args.fps)
+        replay_viewer(states_path, args.fps, args.playback_speed)
 
 
 def preset_segments(name: str) -> list[CommandSegment]:
@@ -167,12 +177,32 @@ def preset_segments(name: str) -> list[CommandSegment]:
         return [CommandSegment(duration=4.2, vx=0.010, vy=0.0, yaw_rate=0.0)]
     if name == "turn-left":
         return [CommandSegment(duration=4.8, vx=0.006, vy=0.0, yaw_rate=0.055)]
+    if name == "forward-2m":
+        return [CommandSegment(duration=36.0, vx=0.070, vy=0.0, yaw_rate=0.0)]
     if name == "straight-turn":
         return [
             CommandSegment(duration=2.4, vx=0.010, vy=0.0, yaw_rate=0.0),
             CommandSegment(duration=3.0, vx=0.006, vy=0.0, yaw_rate=0.055),
         ]
     raise ValueError(f"Unknown preset: {name}")
+
+
+def apply_preset_defaults(args: argparse.Namespace) -> None:
+    if args.preset != "forward-2m":
+        return
+
+    if args.swing_duration == DEFAULT_SWING_DURATION:
+        args.swing_duration = 0.18
+    if args.stance_gap == DEFAULT_STANCE_GAP:
+        args.stance_gap = 0.12
+    if args.swing_height == DEFAULT_SWING_HEIGHT:
+        args.swing_height = 0.022
+    if args.max_step_length == DEFAULT_MAX_STEP_LENGTH:
+        args.max_step_length = 0.08
+    if args.end_padding == DEFAULT_END_PADDING:
+        args.end_padding = 1.5
+    if args.playback_speed == 1.0:
+        args.playback_speed = 2.0
 
 
 def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -187,6 +217,7 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
     locked_positions = {foot: pos.copy() for foot, pos in initial_foot_positions.items()}
 
     windows = build_demo_windows(
+        args.preset,
         segments,
         args.settle_time,
         args.swing_duration,
@@ -212,7 +243,13 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
     stance_controller = StanceWBCQP(
         StanceWBCConfig(
             foot_geoms=foot_geoms,
+            weight_base_pos=350.0,
+            weight_base_ori=240.0,
             weight_force=1.0,
+            kp_base_pos=180.0,
+            kd_base_pos=42.0,
+            kp_base_ori=180.0,
+            kd_base_ori=36.0,
             kp_stance=100.0,
             kd_stance=20.0,
             use_jdot_v=False,
@@ -333,7 +370,7 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
             yaw=ref_yaw,
         )
         base_ref[0] = 0.85 * base_ref[0] + 0.15 * (initial_base_pos[0] + ref_x)
-        base_ref[1] = 0.85 * base_ref[1] + 0.15 * (initial_base_pos[1] + ref_y)
+        base_ref[1] = initial_base_pos[1] + ref_y
 
         com_ref = home_com_ref.copy()
         com_ref[0:2] += base_ref[0:2] - initial_base_pos[0:2]
@@ -374,9 +411,12 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
                             stance_foot_geoms=stance_feet,
                             swing_foot_geoms=swing_feet,
                             normal_force_min=trot.MPC_NORMAL_FORCE_MIN,
+                            weight_base_pos=420.0,
                             weight_swing_foot=1200.0,
                             weight_force=1.0,
                             weight_base_ori=350.0,
+                            kp_base_pos=190.0,
+                            kd_base_pos=45.0,
                             kp_swing=360.0,
                             kd_swing=38.0,
                             kp_base_ori=260.0,
@@ -433,6 +473,7 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
 
 
 def build_demo_windows(
+    preset: str,
     segments: list[CommandSegment],
     settle_time: float,
     swing_duration: float,
@@ -441,7 +482,8 @@ def build_demo_windows(
 ) -> list[DemoWindow]:
     windows: list[DemoWindow] = []
     stride = swing_duration + stance_gap
-    foot_period = 2.0 * stride
+    swing_sets = preset_swing_sets(preset)
+    foot_period = len(swing_sets) * stride
     total_command_time = sum(segment.duration for segment in segments)
     start_time = settle_time
     idx = 0
@@ -454,7 +496,7 @@ def build_demo_windows(
         yaw_delta = command.yaw_rate * foot_period
         windows.append(
             DemoWindow(
-                swing_feet=trot.TROT_PAIRS[idx % 2],
+                swing_feet=swing_sets[idx % len(swing_sets)],
                 start_time=start_time,
                 duration=swing_duration,
                 step_delta=step_delta,
@@ -464,6 +506,12 @@ def build_demo_windows(
         start_time += stride
         idx += 1
     return windows
+
+
+def preset_swing_sets(preset: str) -> tuple[tuple[str, ...], ...]:
+    if preset == "forward-2m":
+        return (("FL",), ("RR",), ("FR",), ("RL",))
+    return trot.TROT_PAIRS
 
 
 def demo_contact_schedule(
@@ -569,10 +617,11 @@ def save_rollout(
         fps=float(args.fps),
         preset=args.preset,
         segments=segment_array,
+        playback_speed=float(args.playback_speed),
     )
 
 
-def render_gif(states_path: Path, gif_path: Path, width: int, height: int, fps: float) -> None:
+def render_gif(states_path: Path, gif_path: Path, width: int, height: int, fps: float, playback_speed: float) -> None:
     rollout = np.load(states_path, allow_pickle=False)
     qpos = rollout["qpos"]
     model = mujoco.MjModel.from_xml_path(str(MODEL_PATH))
@@ -594,7 +643,7 @@ def render_gif(states_path: Path, gif_path: Path, width: int, height: int, fps: 
         renderer.update_scene(data, camera=camera)
         frames.append(Image.fromarray(renderer.render()))
 
-    duration_ms = max(1, int(round(1000.0 / fps)))
+    duration_ms = max(1, int(round(1000.0 / (fps * playback_speed))))
     frames[0].save(
         gif_path,
         save_all=True,
@@ -605,11 +654,11 @@ def render_gif(states_path: Path, gif_path: Path, width: int, height: int, fps: 
     )
 
 
-def replay_viewer(states_path: Path, fps: float) -> None:
+def replay_viewer(states_path: Path, fps: float, playback_speed: float) -> None:
     rollout = np.load(states_path, allow_pickle=False)
     qpos = rollout["qpos"]
     qvel = rollout["qvel"]
-    frame_dt = 1.0 / fps
+    frame_dt = 1.0 / (fps * playback_speed)
     model = mujoco.MjModel.from_xml_path(str(MODEL_PATH))
     data = mujoco.MjData(model)
     with mujoco.viewer.launch_passive(model, data) as viewer:
