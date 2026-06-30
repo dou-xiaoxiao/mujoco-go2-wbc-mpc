@@ -98,7 +98,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Record smooth MPC/WBC locomotion demos.")
     parser.add_argument(
         "--preset",
-        choices=("straight-turn", "straight", "turn-left", "forward-2m", "forward-2m-smooth", "trot-l-route"),
+        choices=(
+            "straight-turn",
+            "straight",
+            "turn-left",
+            "forward-2m",
+            "forward-2m-smooth",
+            "trot-l-route",
+            "trot-l-turn-stop",
+        ),
         default="straight-turn",
         help=(
             "Reference preset. straight/turn presets use diagonal trot; "
@@ -213,6 +221,14 @@ def preset_segments(name: str) -> list[CommandSegment]:
             CommandSegment(duration=3.0, vx=0.0, vy=0.0, yaw_rate=0.0),
             CommandSegment(duration=13.0, vx=0.040, vy=0.0, yaw_rate=0.0),
         ]
+    if name == "trot-l-turn-stop":
+        return [
+            CommandSegment(duration=37.5, vx=0.040, vy=0.0, yaw_rate=0.0),
+            CommandSegment(duration=20.0, vx=0.004, vy=0.0, yaw_rate=np.pi / 40.0),
+            CommandSegment(duration=3.0, vx=0.0, vy=0.0, yaw_rate=0.0),
+            CommandSegment(duration=13.0, vx=0.040, vy=0.0, yaw_rate=0.0),
+            CommandSegment(duration=3.0, vx=0.0, vy=0.0, yaw_rate=0.0),
+        ]
     if name == "straight-turn":
         return [
             CommandSegment(duration=2.4, vx=0.010, vy=0.0, yaw_rate=0.0),
@@ -222,7 +238,7 @@ def preset_segments(name: str) -> list[CommandSegment]:
 
 
 def apply_preset_defaults(args: argparse.Namespace) -> None:
-    if args.preset not in ("forward-2m", "forward-2m-smooth", "trot-l-route"):
+    if args.preset not in ("forward-2m", "forward-2m-smooth", "trot-l-route", "trot-l-turn-stop"):
         return
 
     if args.preset == "forward-2m":

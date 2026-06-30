@@ -25,7 +25,7 @@ MuJoCo floating-base dynamics
 - 实现 full-body WBC QP，决策变量为 `[vdot, tau, f]`
 - 支持四脚 stance、单腿 swing、任意非腾空接触模式的 generic WBC
 - 支持 crawl 和 diagonal trot 的 reference tracking
-- 提供稳定展示 demo：直走、左转、继续直走，中间带短暂停顿恢复
+- 提供稳定展示 demo：直走、左转 90 度、继续直走一段后停稳
 
 ## Current Demo
 
@@ -33,7 +33,7 @@ MuJoCo floating-base dynamics
 
 ```powershell
 cd D:\projects\quadruped_project\mujoco_wbc_project
-.\.venv\Scripts\python.exe .\scripts\record_trot_demo.py --preset trot-l-route --no-gif --viewer-replay
+.\.venv\Scripts\python.exe .\scripts\record_trot_demo.py --preset trot-l-turn-stop --no-gif --viewer-replay
 ```
 
 这个 demo 会先离线 rollout 控制器，再用 MuJoCo viewer 平滑回放保存的状态。
@@ -42,11 +42,11 @@ cd D:\projects\quadruped_project\mujoco_wbc_project
 当前稳定展示参数：
 
 ```text
-preset       = trot-l-route
-motion       = 直走 + 左转 90 度 + 继续直走
+preset       = trot-l-turn-stop
+motion       = 直走 + 左转 90 度 + 继续直走一段 + 停稳
 swing_height = 0.035 m
 stance_gap   = 0.45 s
-recovery     = 转弯后有短暂停顿恢复
+recovery     = 转弯后先恢复，再走一段，在下一次停顿处结束
 foothold     = body-frame lateral width regulation
 ```
 
@@ -59,7 +59,7 @@ foothold     = body-frame lateral width regulation
 生成 GIF：
 
 ```powershell
-.\.venv\Scripts\python.exe .\scripts\record_trot_demo.py --preset trot-l-route
+.\.venv\Scripts\python.exe .\scripts\record_trot_demo.py --preset trot-l-turn-stop
 ```
 
 实时 viewer 版本，适合调试但可能因为 QP 求解显得卡：
