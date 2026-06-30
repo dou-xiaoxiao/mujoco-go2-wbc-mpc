@@ -269,17 +269,20 @@ def main() -> None:
                 )
                 command_time = max(0.0, sim_time - command_start_time)
                 planned_foot_positions = planned_feet_from_refs(locked_positions, swing_refs)
+                yaw_ref = args.yaw_rate * command_time
                 base_ref = foot_centered_base_reference(
                     home_qpos_ref,
                     initial_base_pos,
                     initial_foot_positions,
                     planned_foot_positions,
-                    yaw=args.yaw_rate * command_time,
+                    yaw=yaw_ref,
                 )
                 base_ref[1] = initial_base_pos[1] + args.vy * command_time
                 com_ref = home_com_ref.copy()
                 com_ref[0:2] += base_ref[0:2] - initial_base_pos[0:2]
                 com_vel_ref = np.array([args.vx, args.vy, 0.0], dtype=float)
+                orientation_ref = np.array([0.0, 0.0, yaw_ref], dtype=float)
+                angular_velocity_ref = np.array([0.0, 0.0, args.yaw_rate], dtype=float)
 
             if sim_time >= next_mpc_update:
                 with profiler.time("mpc"):
@@ -287,6 +290,8 @@ def main() -> None:
                         robot,
                         com_ref,
                         com_velocity_ref=com_vel_ref,
+                        orientation_ref=orientation_ref,
+                        angular_velocity_ref=angular_velocity_ref,
                         contact_schedule=contact_schedule,
                     )
                     mpc_force_ref = mpc_solution.first_contact_forces

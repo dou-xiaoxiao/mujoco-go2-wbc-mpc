@@ -77,6 +77,7 @@ scripts/run_centroidal_to_wbc_once.py
 scripts/run_commanded_crawl_viewer.py
 scripts/run_trot_reference_viewer.py
 scripts/debug_trot_headless.py
+scripts/record_trot_demo.py
 ```
 
 Verifies that MuJoCo imports and exposes mass matrix, Jacobian, and inverse
@@ -119,6 +120,16 @@ Quick regression check for the current MPC/WBC interfaces:
 ```powershell
 .\.venv\Scripts\python.exe .\scripts\validate_control_stack.py
 ```
+
+Smooth 60 Hz demo generation:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\record_trot_demo.py --preset straight-turn
+```
+
+This runs the MPC/WBC controller headlessly, stores the simulated states, then
+renders a fixed-rate GIF. Add `--viewer-replay` to replay the stored states in a
+MuJoCo viewer without solving QPs during playback.
 
 Inspect which upstream gait/contact references the current WBC can execute:
 
