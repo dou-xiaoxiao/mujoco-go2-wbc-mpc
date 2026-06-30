@@ -14,6 +14,8 @@ MuJoCo floating-base dynamics
     -> joint torque command
 ```
 
+![Trot L-route demo](docs/assets/trot_l_route_demo.gif)
+
 ## Highlights
 
 - 使用 MuJoCo Go2 floating-base 模型，`nq=19, nv=18, nu=12`
