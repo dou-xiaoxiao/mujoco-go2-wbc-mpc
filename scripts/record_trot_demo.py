@@ -363,7 +363,7 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
             args.touchdown_extra_time,
         ):
             for foot in current_window.swing_feet:
-                locked_positions[foot] = robot.geom_position(foot).copy()
+                locked_positions[foot] = active_plans[foot].target_position.copy()
             active_window_id = None
             next_window_id += 1
             active_plans = {}

@@ -237,7 +237,7 @@ def main() -> None:
                     args.touchdown_extra_time,
                 ):
                     for foot in current_window.swing_feet:
-                        locked_positions[foot] = robot.geom_position(foot).copy()
+                        locked_positions[foot] = active_plans[foot].target_position.copy()
                     completed_windows.add(active_window_id)
                     active_window_id = None
                     next_window_id += 1
