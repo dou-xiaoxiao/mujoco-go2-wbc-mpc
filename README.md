@@ -157,14 +157,6 @@ This preset uses diagonal swing pairs, short all-stance recovery gaps, and
 body-frame lateral foothold-width regulation. It is a conservative
 route-following trot demo, not a fast continuous running trot.
 
-Current robustness hooks used by the trot demos:
-
-```text
-MPC: per-axis roll/pitch/yaw and angular-velocity weights, plus initial force-rate smoothing
-WBC: stronger base orientation and joint posture costs, plus torque-rate regularization
-Contact switch: touchdown hysteresis plus landing force-reference ramp
-```
-
 Inspect which upstream gait/contact references the current WBC can execute:
 
 ```powershell
@@ -240,8 +232,8 @@ between WBC updates the viewer holds the last solved torque command.
 QP solver reuse status:
 
 ```text
-CentroidalMPC:  first call OSQP setup, later calls update P/q/l/u/Ax and warm start
-StanceWBCQP:    first call OSQP setup, later calls update P/q/l/u/Ax and warm start
+CentroidalMPC:  first call OSQP setup, later calls update q/l/u/Ax and warm start
+StanceWBCQP:    first call OSQP setup, later calls update q/l/u/Ax and warm start
 SwingWBCQP:     first call OSQP setup, later calls update P/q/l/u/Ax and warm start
 ```
 

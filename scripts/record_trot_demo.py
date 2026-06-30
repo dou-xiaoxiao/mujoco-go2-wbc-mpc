@@ -45,8 +45,6 @@ from mujoco_wbc import (  # noqa: E402
     CentroidalMPCConfig,
     GeneralContactWBCConfig,
     GeneralContactWBCQP,
-    landing_force_zero_weights,
-    landing_ramped_force_ref,
     MuJoCoModelInterface,
     StanceWBCConfig,
     StanceWBCQP,
@@ -141,9 +139,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-start-delay", type=float, default=0.8)
     parser.add_argument("--touchdown-z-tol", type=float, default=0.02)
     parser.add_argument("--touchdown-extra-time", type=float, default=0.35)
-    parser.add_argument("--touchdown-hold-time", type=float, default=0.010)
-    parser.add_argument("--landing-force-ramp-time", type=float, default=0.05)
-    parser.add_argument("--landing-force-zero-weight", type=float, default=5.0)
     parser.add_argument("--stop-on-fall", action="store_true")
     return parser
 
@@ -175,12 +170,6 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--mpc-dt must be positive")
     if args.wbc_dt <= 0.0:
         raise ValueError("--wbc-dt must be positive")
-    if args.touchdown_hold_time < 0.0:
-        raise ValueError("--touchdown-hold-time must be non-negative")
-    if args.landing_force_ramp_time < 0.0:
-        raise ValueError("--landing-force-ramp-time must be non-negative")
-    if args.landing_force_zero_weight < 0.0:
-        raise ValueError("--landing-force-zero-weight must be non-negative")
 
 
 def main() -> None:
@@ -338,26 +327,20 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
         normal_force_min=trot.MPC_NORMAL_FORCE_MIN,
         weight_com_position=650.0,
         weight_com_velocity=15.0,
-        weight_orientation=500.0,
-        weight_angular_velocity=90.0,
-        weight_orientation_axes=(2100.0, 2100.0, 700.0),
-        weight_angular_velocity_axes=(320.0, 320.0, 110.0),
-        weight_force_rate=2.0e-4,
-        weight_initial_force_rate=8.0e-4,
+        weight_orientation=1400.0,
+        weight_angular_velocity=120.0,
     )
     mpc = CentroidalMPC(mpc_config)
     stance_controller = StanceWBCQP(
         StanceWBCConfig(
             foot_geoms=foot_geoms,
             weight_base_pos=350.0,
-            weight_base_ori=360.0,
-            weight_joint_posture=14.0,
-            weight_tau_rate=5.0e-4,
+            weight_base_ori=240.0,
             weight_force=1.0,
             kp_base_pos=180.0,
             kd_base_pos=42.0,
             kp_base_ori=180.0,
-            kd_base_ori=44.0,
+            kd_base_ori=36.0,
             kp_stance=100.0,
             kd_stance=20.0,
             use_jdot_v=False,
@@ -370,8 +353,6 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
     next_window_id = 0
     active_plans: dict[str, SwingPlan] = {}
     window_delay_used = np.zeros(len(windows), dtype=float)
-    touchdown_times_by_foot: dict[str, float] = {}
-    touchdown_candidate_times: dict[str, float] = {}
     next_mpc_update = 0.0
     next_wbc_update = 0.0
     next_log_time = 0.0
@@ -434,8 +415,6 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
                     )
                     for foot in window.swing_feet
                 }
-                for foot in window.swing_feet:
-                    touchdown_candidate_times.pop(foot, None)
                 next_wbc_update = sim_time
                 next_mpc_update = sim_time
 
@@ -447,13 +426,9 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
             sim_time,
             args.touchdown_z_tol,
             args.touchdown_extra_time,
-            args.touchdown_hold_time,
-            touchdown_candidate_times,
         ):
             for foot in current_window.swing_feet:
                 locked_positions[foot] = active_plans[foot].target_position.copy()
-                touchdown_times_by_foot[foot] = sim_time
-                touchdown_candidate_times.pop(foot, None)
             active_window_id = None
             next_window_id += 1
             active_plans = {}
@@ -518,26 +493,11 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
             next_mpc_update += args.mpc_dt
 
         if sim_time >= next_wbc_update:
-            ramped_force_ref = landing_ramped_force_ref(
-                mpc_force_ref,
-                foot_geoms,
-                sim_time,
-                touchdown_times_by_foot,
-                args.landing_force_ramp_time,
-            )
-            landing_zero_weights = landing_force_zero_weights(
-                foot_geoms,
-                sim_time,
-                touchdown_times_by_foot,
-                args.landing_force_ramp_time,
-                args.landing_force_zero_weight,
-            )
             if current_window is None:
                 solution = stance_controller.solve(
                     robot,
                     base_ref,
-                    force_ref=ramped_force_ref,
-                    force_zero_weights=landing_zero_weights,
+                    force_ref=mpc_force_ref,
                     stance_pos_refs=locked_positions,
                 )
             else:
@@ -553,15 +513,13 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
                             weight_base_pos=420.0,
                             weight_swing_foot=1200.0,
                             weight_force=1.0,
-                            weight_base_ori=500.0,
-                            weight_joint_posture=10.0,
-                            weight_tau_rate=5.0e-4,
+                            weight_base_ori=350.0,
                             kp_base_pos=190.0,
                             kd_base_pos=45.0,
                             kp_swing=360.0,
                             kd_swing=38.0,
                             kp_base_ori=260.0,
-                            kd_base_ori=48.0,
+                            kd_base_ori=44.0,
                             kp_stance=100.0,
                             kd_stance=20.0,
                             use_jdot_v=False,
@@ -573,8 +531,7 @@ def rollout_demo(args: argparse.Namespace, segments: list[CommandSegment]) -> tu
                     swing_pos_refs={foot: ref.position for foot, ref in swing_refs.items()},
                     swing_vel_refs={foot: ref.velocity for foot, ref in swing_refs.items()},
                     swing_acc_refs={foot: ref.acceleration for foot, ref in swing_refs.items()},
-                    force_ref=trot.force_ref_for_feet(ramped_force_ref, stance_feet),
-                    force_zero_weights=trot.force_ref_for_feet(landing_zero_weights, stance_feet),
+                    force_ref=trot.force_ref_for_feet(mpc_force_ref, stance_feet),
                     stance_pos_refs={foot: locked_positions[foot] for foot in stance_feet},
                 )
             if solution.status in ("solved", "solved inaccurate"):

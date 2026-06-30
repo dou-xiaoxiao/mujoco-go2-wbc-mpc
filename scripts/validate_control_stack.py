@@ -29,10 +29,7 @@ from mujoco_wbc import (  # noqa: E402
     StanceWBCConfig,
     StanceWBCQP,
     current_single_leg_phase,
-    landing_force_zero_weights,
-    landing_ramped_force_ref,
     single_leg_swing_schedule,
-    update_touchdown_hysteresis,
 )
 
 
@@ -43,7 +40,6 @@ def main() -> None:
     robot.set_keyframe("home")
 
     checks.append(check_phase_semantics())
-    checks.append(check_contact_transition_helpers())
     checks.append(check_stance_wbc(robot))
     checks.append(check_single_leg_swing_wbc(robot))
     checks.append(check_general_contact_wbc_crawl_mode(robot))
@@ -92,28 +88,6 @@ def check_phase_semantics() -> tuple[str, bool, str]:
 
     ok = before_touchdown == "swing" and after_touchdown == "stance" and fl_column == [False, False, False, True]
     return "contact phase semantics", ok, f"phase=({before_touchdown}, {after_touchdown}), FL={fl_column}"
-
-
-def check_contact_transition_helpers() -> tuple[str, bool, str]:
-    force_ref = np.arange(12, dtype=float)
-    touchdown_times = {"FL": 1.0}
-    ramped_start = landing_ramped_force_ref(force_ref, FOOT_GEOMS, 1.0, touchdown_times, ramp_time=0.2)
-    ramped_done = landing_ramped_force_ref(force_ref, FOOT_GEOMS, 1.3, touchdown_times, ramp_time=0.2)
-    zero_weights = landing_force_zero_weights(FOOT_GEOMS, 1.0, touchdown_times, ramp_time=0.2, zero_weight=5.0)
-
-    candidates: dict[str, float] = {}
-    early = update_touchdown_hysteresis({"FL": True, "RR": True}, 2.0, 0.05, candidates)
-    late = update_touchdown_hysteresis({"FL": True, "RR": True}, 2.06, 0.05, candidates)
-
-    fl = FOOT_GEOMS.index("FL")
-    ok = (
-        np.allclose(ramped_start.reshape(4, 3)[fl], 0.0)
-        and np.allclose(ramped_done, force_ref)
-        and np.allclose(zero_weights.reshape(4, 3)[fl], 5.0)
-        and not early
-        and late
-    )
-    return "contact transition helpers", ok, f"ramp0={ramped_start.reshape(4, 3)[fl].tolist()}, hysteresis=({early}, {late})"
 
 
 def check_stance_wbc(robot: MuJoCoModelInterface) -> tuple[str, bool, str]:

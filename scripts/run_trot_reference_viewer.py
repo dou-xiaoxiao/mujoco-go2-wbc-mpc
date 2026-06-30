@@ -32,14 +32,11 @@ from mujoco_wbc import (  # noqa: E402
     CentroidalMPCConfig,
     GeneralContactWBCConfig,
     GeneralContactWBCQP,
-    landing_force_zero_weights,
-    landing_ramped_force_ref,
     LoopProfiler,
     MuJoCoModelInterface,
     StanceWBCConfig,
     StanceWBCQP,
     swing_foothold_reference,
-    update_touchdown_hysteresis,
 )
 
 
@@ -77,9 +74,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile-dt", type=float, default=PROFILE_LOG_DT, help="Profiler print period in sim seconds.")
     parser.add_argument("--touchdown-z-tol", type=float, default=0.018, help="Foot-point z tolerance for trot touchdown.")
     parser.add_argument("--touchdown-extra-time", type=float, default=0.25, help="Maximum extra swing time while waiting for touchdown.")
-    parser.add_argument("--touchdown-hold-time", type=float, default=0.010, help="Continuous touchdown-condition time before switching to stance.")
-    parser.add_argument("--landing-force-ramp-time", type=float, default=0.05, help="Force-reference ramp time after touchdown.")
-    parser.add_argument("--landing-force-zero-weight", type=float, default=5.0, help="Temporary WBC force-to-zero weight after touchdown.")
     parser.add_argument("--start-roll-tol", type=float, default=0.04, help="Maximum absolute roll before starting the next trot swing.")
     parser.add_argument("--start-y-tol", type=float, default=0.04, help="Maximum absolute lateral base error before starting the next trot swing.")
     parser.add_argument("--max-start-delay", type=float, default=0.50, help="Maximum delay applied to a trot swing while waiting for recovery.")
@@ -110,12 +104,6 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--touchdown-z-tol must be non-negative")
     if args.touchdown_extra_time < 0.0:
         raise ValueError("--touchdown-extra-time must be non-negative")
-    if args.touchdown_hold_time < 0.0:
-        raise ValueError("--touchdown-hold-time must be non-negative")
-    if args.landing_force_ramp_time < 0.0:
-        raise ValueError("--landing-force-ramp-time must be non-negative")
-    if args.landing_force_zero_weight < 0.0:
-        raise ValueError("--landing-force-zero-weight must be non-negative")
     if args.start_roll_tol < 0.0:
         raise ValueError("--start-roll-tol must be non-negative")
     if args.start_y_tol < 0.0:
@@ -150,23 +138,14 @@ def main() -> None:
         horizon_steps=12,
         dt=0.03,
         normal_force_min=MPC_NORMAL_FORCE_MIN,
-        weight_orientation=500.0,
-        weight_angular_velocity=80.0,
-        weight_orientation_axes=(2000.0, 2000.0, 600.0),
-        weight_angular_velocity_axes=(300.0, 300.0, 90.0),
-        weight_force_rate=2.0e-4,
-        weight_initial_force_rate=8.0e-4,
+        weight_orientation=1200.0,
+        weight_angular_velocity=100.0,
     )
     mpc = CentroidalMPC(mpc_config)
     stance_controller = StanceWBCQP(
         StanceWBCConfig(
             foot_geoms=FOOT_GEOMS,
             weight_force=1.0,
-            weight_base_ori=320.0,
-            weight_joint_posture=14.0,
-            weight_tau_rate=5.0e-4,
-            kp_base_ori=220.0,
-            kd_base_ori=44.0,
             kp_stance=100.0,
             kd_stance=20.0,
             use_jdot_v=False,
@@ -180,8 +159,6 @@ def main() -> None:
     active_plans: dict[str, SwingPlan] = {}
     completed_windows: set[int] = set()
     window_delay_used = np.zeros(len(windows), dtype=float)
-    touchdown_times_by_foot: dict[str, float] = {}
-    touchdown_candidate_times: dict[str, float] = {}
     next_mpc_update = 0.0
     next_wbc_update = 0.0
     next_viewer_sync = 0.0
@@ -247,8 +224,6 @@ def main() -> None:
                             )
                             for foot in window.swing_feet
                         }
-                        for foot in window.swing_feet:
-                            touchdown_candidate_times.pop(foot, None)
                         next_wbc_update = sim_time
                         next_mpc_update = sim_time
 
@@ -260,13 +235,9 @@ def main() -> None:
                     sim_time,
                     args.touchdown_z_tol,
                     args.touchdown_extra_time,
-                    args.touchdown_hold_time,
-                    touchdown_candidate_times,
                 ):
                     for foot in current_window.swing_feet:
                         locked_positions[foot] = active_plans[foot].target_position.copy()
-                        touchdown_times_by_foot[foot] = sim_time
-                        touchdown_candidate_times.pop(foot, None)
                     completed_windows.add(active_window_id)
                     active_window_id = None
                     next_window_id += 1
@@ -330,26 +301,11 @@ def main() -> None:
 
             if sim_time >= next_wbc_update:
                 with profiler.time("wbc"):
-                    ramped_force_ref = landing_ramped_force_ref(
-                        mpc_force_ref,
-                        FOOT_GEOMS,
-                        sim_time,
-                        touchdown_times_by_foot,
-                        args.landing_force_ramp_time,
-                    )
-                    landing_zero_weights = landing_force_zero_weights(
-                        FOOT_GEOMS,
-                        sim_time,
-                        touchdown_times_by_foot,
-                        args.landing_force_ramp_time,
-                        args.landing_force_zero_weight,
-                    )
                     if current_window is None:
                         solution = stance_controller.solve(
                             robot,
                             base_ref,
-                            force_ref=ramped_force_ref,
-                            force_zero_weights=landing_zero_weights,
+                            force_ref=mpc_force_ref,
                             stance_pos_refs=locked_positions,
                         )
                     else:
@@ -364,13 +320,11 @@ def main() -> None:
                                     normal_force_min=MPC_NORMAL_FORCE_MIN,
                                     weight_swing_foot=1400.0,
                                     weight_force=1.0,
-                                    weight_base_ori=450.0,
-                                    weight_joint_posture=10.0,
-                                    weight_tau_rate=5.0e-4,
+                                    weight_base_ori=300.0,
                                     kp_swing=450.0,
                                     kd_swing=42.0,
                                     kp_base_ori=240.0,
-                                    kd_base_ori=46.0,
+                                    kd_base_ori=40.0,
                                     kp_stance=100.0,
                                     kd_stance=20.0,
                                     use_jdot_v=False,
@@ -382,8 +336,7 @@ def main() -> None:
                             swing_pos_refs={foot: ref.position for foot, ref in swing_refs.items()},
                             swing_vel_refs={foot: ref.velocity for foot, ref in swing_refs.items()},
                             swing_acc_refs={foot: ref.acceleration for foot, ref in swing_refs.items()},
-                            force_ref=force_ref_for_feet(ramped_force_ref, stance_feet),
-                            force_zero_weights=force_ref_for_feet(landing_zero_weights, stance_feet),
+                            force_ref=force_ref_for_feet(mpc_force_ref, stance_feet),
                             stance_pos_refs={foot: locked_positions[foot] for foot in stance_feet},
                         )
 
@@ -490,31 +443,20 @@ def should_finish_trot_window(
     time_s: float,
     touchdown_z_tol: float,
     touchdown_extra_time: float,
-    touchdown_hold_time: float = 0.0,
-    touchdown_candidate_times: dict[str, float] | None = None,
 ) -> bool:
     if time_s < window.end_time:
         return False
     if time_s >= window.end_time + touchdown_extra_time:
         return True
 
-    condition_by_foot = {}
     for foot in window.swing_feet:
         plan = active_plans[foot]
         foot_pos = robot.geom_position(foot)
         target_pos = plan.target_position
         near_ground = foot_pos[2] <= target_pos[2] + touchdown_z_tol
-        near_target_xy = np.linalg.norm(foot_pos[0:2] - target_pos[0:2]) <= 0.04
-        condition_by_foot[foot] = bool(near_ground and near_target_xy)
-
-    if touchdown_hold_time <= 0.0 or touchdown_candidate_times is None:
-        return all(condition_by_foot.values())
-    return update_touchdown_hysteresis(
-        condition_by_foot,
-        time_s,
-        touchdown_hold_time,
-        touchdown_candidate_times,
-    )
+        if not (robot.geom_has_contact(foot) or near_ground):
+            return False
+    return True
 
 
 def should_delay_next_trot_window(

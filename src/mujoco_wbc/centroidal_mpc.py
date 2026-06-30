@@ -57,11 +57,8 @@ class CentroidalMPCConfig:
     weight_com_velocity: float = 20.0
     weight_orientation: float = 200.0
     weight_angular_velocity: float = 20.0
-    weight_orientation_axes: tuple[float, float, float] | None = None
-    weight_angular_velocity_axes: tuple[float, float, float] | None = None
     weight_force_regularization: float = 1.0e-4
     weight_force_rate: float = 1.0e-5
-    weight_initial_force_rate: float = 1.0e-5
 
 
 @dataclass(frozen=True)
@@ -319,11 +316,9 @@ class CentroidalMPC:
             angular_velocity_ref,
         )
         self._add_force_cost(p_diag, q, n_state_vars, n_steps, n_contacts, mass, gravity, contact_schedule)
-        previous_first_force = self._previous_first_force(n_state_vars, n_steps, n_contacts)
-        self._add_initial_force_rate_cost(p_diag, q, n_state_vars, n_contacts, previous_first_force)
         p = sparse.diags(p_diag + 1.0e-9, format="lil")
         self._add_force_rate_cost(p, q, n_state_vars, n_steps, nu)
-        p = sparse.triu(p, format="csc")
+        p = p.tocsc()
 
         a_dyn, l_dyn, u_dyn = self._dynamics_constraints(
             n_steps,
@@ -386,7 +381,7 @@ class CentroidalMPC:
         l: Array,
         u: Array,
     ) -> Any:
-        shape = (p.shape[0], a.shape[0], p.nnz, a.nnz)
+        shape = (p.shape[0], a.shape[0], a.nnz)
         if self._solver is None or self._problem_shape != shape:
             self._solver = osqp.OSQP()
             self._solver.setup(
@@ -405,7 +400,7 @@ class CentroidalMPC:
             self._problem_shape = shape
         else:
             try:
-                self._solver.update(q=q, l=l, u=u, Px=p.data, Ax=a.data)
+                self._solver.update(q=q, l=l, u=u, Ax=a.data)
             except ValueError:
                 self._solver = osqp.OSQP()
                 self._solver.setup(
@@ -442,18 +437,16 @@ class CentroidalMPC:
         angular_velocity_ref: Array,
     ) -> None:
         cfg = self.config
-        orientation_weight = axis_weights(cfg.weight_orientation, cfg.weight_orientation_axes)
-        angular_velocity_weight = axis_weights(cfg.weight_angular_velocity, cfg.weight_angular_velocity_axes)
         for step in range(1, n_steps + 1):
             base = step * nx
             p_diag[base : base + 3] += cfg.weight_com_position
             q[base : base + 3] += -cfg.weight_com_position * com_position_ref[step]
             p_diag[base + 3 : base + 6] += cfg.weight_com_velocity
             q[base + 3 : base + 6] += -cfg.weight_com_velocity * com_velocity_ref[step]
-            p_diag[base + 6 : base + 9] += orientation_weight
-            q[base + 6 : base + 9] += -orientation_weight * orientation_ref[step]
-            p_diag[base + 9 : base + 12] += angular_velocity_weight
-            q[base + 9 : base + 12] += -angular_velocity_weight * angular_velocity_ref[step]
+            p_diag[base + 6 : base + 9] += cfg.weight_orientation
+            q[base + 6 : base + 9] += -cfg.weight_orientation * orientation_ref[step]
+            p_diag[base + 9 : base + 12] += cfg.weight_angular_velocity
+            q[base + 9 : base + 12] += -cfg.weight_angular_velocity * angular_velocity_ref[step]
 
     def _add_force_cost(
         self,
@@ -489,29 +482,6 @@ class CentroidalMPC:
                 p[curr + idx, curr + idx] += weight
                 p[prev + idx, curr + idx] += -weight
                 p[curr + idx, prev + idx] += -weight
-
-    def _add_initial_force_rate_cost(
-        self,
-        p_diag: Array,
-        q: Array,
-        force_offset: int,
-        n_contacts: int,
-        previous_first_force: Array | None,
-    ) -> None:
-        weight = self.config.weight_initial_force_rate
-        if weight <= 0.0 or previous_first_force is None:
-            return
-        first_force = slice(force_offset, force_offset + 3 * n_contacts)
-        p_diag[first_force] += weight
-        q[first_force] += -weight * previous_first_force
-
-    def _previous_first_force(self, n_state_vars: int, n_steps: int, n_contacts: int) -> Array | None:
-        if self._last_solution is None:
-            return None
-        expected = n_state_vars + n_steps * 3 * n_contacts
-        if self._last_solution.shape != (expected,):
-            return None
-        return self._last_solution[n_state_vars : n_state_vars + 3 * n_contacts].copy()
 
     def _dynamics_constraints(
         self,
@@ -708,12 +678,3 @@ def quat_to_rpy(quat: Array) -> Array:
     pitch = np.arcsin(np.clip(sin_pitch, -1.0, 1.0))
     yaw = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
     return np.array([roll, pitch, yaw], dtype=float)
-
-
-def axis_weights(scalar_weight: float, axis_weight: tuple[float, float, float] | None) -> Array:
-    if axis_weight is None:
-        return np.full(3, float(scalar_weight), dtype=float)
-    weights = np.asarray(axis_weight, dtype=float)
-    if weights.shape != (3,):
-        raise ValueError(f"axis_weight must have shape (3,), got {weights.shape}")
-    return weights
