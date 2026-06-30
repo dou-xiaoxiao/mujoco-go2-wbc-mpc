@@ -153,7 +153,6 @@ def main() -> None:
     mpc_force_ref = np.zeros(3 * len(FOOT_GEOMS))
     mpc_status = "not run"
     mpc_residual = 0.0
-    solve_failures = 0
     profiler = LoopProfiler()
     profile_wall_start = time.perf_counter()
     profile_sim_start = 0.0
@@ -177,34 +176,6 @@ def main() -> None:
             not args.ignore_jdot_v,
         )
     )
-
-    initial_schedule = trot_contact_schedule(windows, 0.0, mpc_config.horizon_steps, mpc_config.dt)
-    initial_base_ref = base_reference(home_qpos_ref, initial_base_pos, 0.0, args.vx, args.vy, args.yaw_rate)
-    initial_com_ref = home_com_ref.copy()
-    initial_mpc = mpc.solve(
-        robot,
-        initial_com_ref,
-        com_velocity_ref=np.array([args.vx, args.vy, 0.0], dtype=float),
-        contact_schedule=initial_schedule,
-    )
-    mpc_force_ref = initial_mpc.first_contact_forces
-    mpc_status = initial_mpc.status
-    mpc_residual = float(np.linalg.norm(initial_mpc.dynamics_residual))
-    initial_wbc = stance_controller.solve(
-        robot,
-        initial_base_ref,
-        force_ref=mpc_force_ref,
-        stance_pos_refs=locked_positions,
-    )
-    last_wbc_status = initial_wbc.status
-    if is_solved(initial_mpc.status) and is_solved(initial_wbc.status):
-        last_tau = initial_wbc.tau.copy()
-        last_max_tau = float(np.max(np.abs(last_tau)))
-        robot.data.ctrl[:] = last_tau
-    else:
-        print(f"warning: initial solve failed, mpc={initial_mpc.status}, wbc={initial_wbc.status}")
-    next_mpc_update = args.mpc_dt
-    next_wbc_update = args.wbc_dt
 
     with mujoco.viewer.launch_passive(robot.model, robot.data) as viewer:
         while viewer.is_running():
@@ -311,11 +282,11 @@ def main() -> None:
                         )
 
                     last_wbc_status = solution.status
-                    if is_solved(solution.status) and is_solved(mpc_status):
+                    if solution.status in ("solved", "solved inaccurate") and mpc_status in ("solved", "solved inaccurate"):
                         last_tau = solution.tau.copy()
-                        last_max_tau = float(np.max(np.abs(last_tau)))
                     else:
-                        solve_failures += 1
+                        last_tau = np.zeros(robot.nu)
+                    last_max_tau = float(np.max(np.abs(last_tau)))
                 next_wbc_update += args.wbc_dt
 
             robot.data.ctrl[:] = last_tau
@@ -330,7 +301,7 @@ def main() -> None:
             if robot.data.time >= next_log_time:
                 phase = "stance" if current_window is None else "+".join(current_window.swing_feet) + "-swing"
                 print(
-                    "t={:.2f}s phase={} step={}/{} base={} disp={} tau={:.2f} mpc={} wbc={} fails={} mpc_res={:.1e}".format(
+                    "t={:.2f}s phase={} step={}/{} base={} disp={} tau={:.2f} mpc={} wbc={} mpc_res={:.1e}".format(
                         robot.data.time,
                         phase,
                         min(next_window_id, len(windows)),
@@ -340,7 +311,6 @@ def main() -> None:
                         last_max_tau,
                         mpc_status,
                         last_wbc_status,
-                        solve_failures,
                         mpc_residual,
                     )
                 )
@@ -429,10 +399,6 @@ def force_ref_for_feet(force_ref_all: np.ndarray, selected_feet: tuple[str, ...]
         for foot, force in zip(FOOT_GEOMS, force_ref_all.reshape(len(FOOT_GEOMS), 3))
     }
     return np.vstack([forces_by_foot[foot] for foot in selected_feet]).reshape(-1)
-
-
-def is_solved(status: str) -> bool:
-    return status in {"solved", "solved inaccurate"}
 
 
 if __name__ == "__main__":
