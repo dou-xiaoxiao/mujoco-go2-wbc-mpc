@@ -139,6 +139,13 @@ The viewer demo exposes the upper-layer command directly:
 .\.venv\Scripts\python.exe .\scripts\run_commanded_crawl_viewer.py --demo stand-step
 ```
 
+Run a diagonal-pair trot reference through the generic contact-mode WBC:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\run_trot_reference_viewer.py --vx 0.012
+.\.venv\Scripts\python.exe .\scripts\run_trot_reference_viewer.py --vx 0.008 --yaw-rate 0.04
+```
+
 The continuous crawl scripts are command-driven:
 
 ```text

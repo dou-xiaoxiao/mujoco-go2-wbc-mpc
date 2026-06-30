@@ -21,6 +21,8 @@ sys.path.insert(0, str(SRC_ROOT))
 from mujoco_wbc import (  # noqa: E402
     CentroidalMPC,
     CentroidalMPCConfig,
+    GeneralContactWBCConfig,
+    GeneralContactWBCQP,
     MuJoCoModelInterface,
     SingleLegSwingWBCConfig,
     SingleLegSwingWBCQP,
@@ -40,6 +42,8 @@ def main() -> None:
     checks.append(check_phase_semantics())
     checks.append(check_stance_wbc(robot))
     checks.append(check_single_leg_swing_wbc(robot))
+    checks.append(check_general_contact_wbc_crawl_mode(robot))
+    checks.append(check_general_contact_wbc_trot_mode(robot))
     checks.extend(check_mpc_schedules(robot))
 
     failed = [name for name, ok, _ in checks if not ok]
@@ -113,6 +117,47 @@ def check_single_leg_swing_wbc(robot: MuJoCoModelInterface) -> tuple[str, bool, 
     swing = float(np.linalg.norm(solution.swing_accel_error))
     ok = is_solved(solution.status) and dyn < 1.0e-5 and stance < 1.0e-5
     return "single-leg swing WBC", ok, f"status={solution.status}, dyn={dyn:.2e}, stance={stance:.2e}, swing={swing:.2e}"
+
+
+def check_general_contact_wbc_crawl_mode(robot: MuJoCoModelInterface) -> tuple[str, bool, str]:
+    robot.set_keyframe("home")
+    qpos_ref = robot.q.copy()
+    swing_pos_refs = {"FL": robot.geom_position("FL") + np.array([0.0, 0.0, 0.03])}
+
+    controller = GeneralContactWBCQP(
+        GeneralContactWBCConfig(
+            stance_foot_geoms=("FR", "RL", "RR"),
+            swing_foot_geoms=("FL",),
+        )
+    )
+    solution = controller.solve(robot, qpos_ref, swing_pos_refs=swing_pos_refs)
+    dyn = float(np.linalg.norm(solution.dynamics_residual))
+    stance = float(np.linalg.norm(solution.stance_residual))
+    swing = float(np.linalg.norm(solution.swing_accel_error))
+    ok = is_solved(solution.status) and dyn < 1.0e-5 and stance < 1.0e-5
+    return "general WBC crawl mode", ok, f"status={solution.status}, dyn={dyn:.2e}, stance={stance:.2e}, swing={swing:.2e}"
+
+
+def check_general_contact_wbc_trot_mode(robot: MuJoCoModelInterface) -> tuple[str, bool, str]:
+    robot.set_keyframe("home")
+    qpos_ref = robot.q.copy()
+    swing_pos_refs = {
+        "FL": robot.geom_position("FL") + np.array([0.02, 0.0, 0.03]),
+        "RR": robot.geom_position("RR") + np.array([0.02, 0.0, 0.03]),
+    }
+
+    controller = GeneralContactWBCQP(
+        GeneralContactWBCConfig(
+            stance_foot_geoms=("FR", "RL"),
+            swing_foot_geoms=("FL", "RR"),
+        )
+    )
+    solution = controller.solve(robot, qpos_ref, swing_pos_refs=swing_pos_refs)
+    dyn = float(np.linalg.norm(solution.dynamics_residual))
+    stance = float(np.linalg.norm(solution.stance_residual))
+    swing = float(np.linalg.norm(solution.swing_accel_error))
+    ok = is_solved(solution.status) and dyn < 1.0e-5 and stance < 1.0e-5
+    return "general WBC trot mode", ok, f"status={solution.status}, dyn={dyn:.2e}, stance={stance:.2e}, swing={swing:.2e}"
 
 
 def check_mpc_schedules(robot: MuJoCoModelInterface) -> list[tuple[str, bool, str]]:

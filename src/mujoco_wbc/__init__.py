@@ -37,6 +37,9 @@ from .reference_inputs import (
 from .support_polygon import SupportReference, body_reference_from_support, support_centroid
 from .swing_trajectory import SwingReference, smoothstep, swing_foothold_reference
 from .wbc_qp import (
+    GeneralContactWBCConfig,
+    GeneralContactWBCQP,
+    GeneralContactWBCSolution,
     SingleLegSwingWBCConfig,
     SingleLegSwingWBCQP,
     SingleLegSwingWBCSolution,
@@ -66,6 +69,9 @@ __all__ = [
     "LoopProfiler",
     "LocomotionReferenceFrame",
     "ModeSupportReport",
+    "GeneralContactWBCConfig",
+    "GeneralContactWBCQP",
+    "GeneralContactWBCSolution",
     "SingleLegSwingWBCConfig",
     "SingleLegSwingWBCQP",
     "SingleLegSwingWBCSolution",

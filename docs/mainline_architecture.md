@@ -267,6 +267,7 @@ Done enough for the current milestone:
 MuJoCo Go2 floating-base model interface
 full-body WBC dynamics QP
 single-leg swing WBC without IK
+generic non-flight contact-mode WBC for crawl/trot-like references
 SRB-MPC force references
 time-varying contact schedule over the MPC horizon
 continuous crawl demo path in the viewer

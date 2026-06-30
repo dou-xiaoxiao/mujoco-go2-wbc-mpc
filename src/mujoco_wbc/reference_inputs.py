@@ -86,6 +86,15 @@ def classify_contact_mode(
             reason="current WBC assumes at least stance contacts for contact-force constraints",
         )
 
+    if len(swing_feet) >= 1 and len(stance_feet) >= 1:
+        return ModeSupportReport(
+            mode_name=f"{len(swing_feet)}-swing",
+            contact_state=contact_state,
+            supported=True,
+            required_wbc="GeneralContactWBCQP",
+            reason="generic WBC supports arbitrary non-flight stance/swing subsets",
+        )
+
     return ModeSupportReport(
         mode_name=f"{len(swing_feet)}-swing",
         contact_state=contact_state,

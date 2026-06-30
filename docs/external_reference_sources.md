@@ -78,7 +78,7 @@ deciding which WBC mode is missing next
 Expected gap:
 
 ```text
-trot, pace, and bound require two swing feet
+dynamic quality for trot, pace, and bound depends on better references
 pronk and jump require flight handling
 ```
 
@@ -132,12 +132,13 @@ The current WBC supports:
 ```text
 all four feet stance
 one swing foot + three stance feet
+two swing feet + two stance feet
+generic non-flight stance/swing subsets
 ```
 
 It does not yet support:
 
 ```text
-two swing feet + two stance feet  -> needed for trot / pace / bound
 zero stance feet / flight phase   -> needed for pronk / jump
 ```
 
@@ -152,12 +153,12 @@ new WBC support.
 
 ## Practical Next Step
 
-Do not tune the planner further. The next control-layer feature is:
+Do not tune the planner further. The current control-layer feature is:
 
 ```text
-MultiSwingWBCQP
+GeneralContactWBCQP
 ```
 
-That is the missing executor for trot-like references. Once it exists, external
-trot references can enter the same MPC/WBC pipeline without changing the project
-boundary.
+This executor lets crawl-like and trot-like references enter the same MPC/WBC
+pipeline without changing the project boundary. The remaining missing executor
+for jumping is a flight-phase WBC, which is intentionally out of scope.
