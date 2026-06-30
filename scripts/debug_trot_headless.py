@@ -49,6 +49,8 @@ def main() -> None:
     parser.add_argument("--start-roll-tol", type=float, default=0.04)
     parser.add_argument("--start-y-tol", type=float, default=0.04)
     parser.add_argument("--max-start-delay", type=float, default=0.50)
+    parser.add_argument("--mpc-dt", type=float, default=trot.MPC_UPDATE_DT)
+    parser.add_argument("--wbc-dt", type=float, default=trot.WBC_UPDATE_DT)
     args = parser.parse_args()
 
     robot = MuJoCoModelInterface(trot.MODEL_PATH)
@@ -96,7 +98,13 @@ def main() -> None:
     )
     mpc = CentroidalMPC(mpc_config)
     stance_controller = StanceWBCQP(
-        StanceWBCConfig(foot_geoms=foot_geoms, weight_force=1.0, kp_stance=100.0, kd_stance=20.0)
+        StanceWBCConfig(
+            foot_geoms=foot_geoms,
+            weight_force=1.0,
+            kp_stance=100.0,
+            kd_stance=20.0,
+            use_jdot_v=False,
+        )
     )
     generic_controllers: dict[tuple[tuple[str, ...], tuple[str, ...]], GeneralContactWBCQP] = {}
 
@@ -217,7 +225,7 @@ def main() -> None:
                 contact_schedule=contact_schedule,
             )
             mpc_force_ref = mpc_solution.first_contact_forces
-            next_mpc_update += trot.MPC_UPDATE_DT
+            next_mpc_update += args.mpc_dt
 
         if sim_time >= next_wbc_update:
             if current_window is None:
@@ -246,6 +254,7 @@ def main() -> None:
                             kd_base_ori=40.0,
                             kp_stance=100.0,
                             kd_stance=20.0,
+                            use_jdot_v=False,
                         )
                     )
                 solution = generic_controllers[key].solve(
@@ -262,7 +271,7 @@ def main() -> None:
                 last_wbc_force = solution.contact_forces.copy()
             else:
                 solve_failures += 1
-            next_wbc_update += trot.WBC_UPDATE_DT
+            next_wbc_update += args.wbc_dt
 
         robot.data.ctrl[:] = last_tau
         mujoco.mj_step(robot.model, robot.data)

@@ -19,8 +19,8 @@ MODEL_PATH = PROJECT_ROOT / "models" / "mujoco_menagerie" / "unitree_go2" / "sce
 
 FOOT_GEOMS = ("FL", "FR", "RL", "RR")
 TROT_PAIRS = (("FL", "RR"), ("FR", "RL"))
-MPC_UPDATE_DT = 0.04
-WBC_UPDATE_DT = 0.008
+MPC_UPDATE_DT = 0.08
+WBC_UPDATE_DT = 0.02
 VIEWER_SYNC_DT = 1.0 / 60.0
 PROFILE_LOG_DT = 2.0
 MPC_NORMAL_FORCE_MIN = 5.0
@@ -69,6 +69,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--swing-height", type=float, default=0.025, help="Swing clearance in meters.")
     parser.add_argument("--max-step-length", type=float, default=0.035, help="Planar foothold delta limit in meters.")
     parser.add_argument("--viewer-hz", type=float, default=60.0, help="Viewer sync rate. Use 0 to sync every step.")
+    parser.add_argument("--mpc-dt", type=float, default=MPC_UPDATE_DT, help="MPC update period in seconds.")
+    parser.add_argument("--wbc-dt", type=float, default=WBC_UPDATE_DT, help="WBC update period in seconds.")
     parser.add_argument("--profile-dt", type=float, default=PROFILE_LOG_DT, help="Profiler print period in sim seconds.")
     parser.add_argument("--touchdown-z-tol", type=float, default=0.018, help="Foot-point z tolerance for trot touchdown.")
     parser.add_argument("--touchdown-extra-time", type=float, default=0.25, help="Maximum extra swing time while waiting for touchdown.")
@@ -92,6 +94,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--max-step-length must be positive")
     if args.viewer_hz < 0.0:
         raise ValueError("--viewer-hz must be non-negative")
+    if args.mpc_dt <= 0.0:
+        raise ValueError("--mpc-dt must be positive")
+    if args.wbc_dt <= 0.0:
+        raise ValueError("--wbc-dt must be positive")
     if args.profile_dt < 0.0:
         raise ValueError("--profile-dt must be non-negative")
     if args.touchdown_z_tol < 0.0:
@@ -137,7 +143,13 @@ def main() -> None:
     )
     mpc = CentroidalMPC(mpc_config)
     stance_controller = StanceWBCQP(
-        StanceWBCConfig(foot_geoms=FOOT_GEOMS, weight_force=1.0, kp_stance=100.0, kd_stance=20.0)
+        StanceWBCConfig(
+            foot_geoms=FOOT_GEOMS,
+            weight_force=1.0,
+            kp_stance=100.0,
+            kd_stance=20.0,
+            use_jdot_v=False,
+        )
     )
     generic_controllers: dict[tuple[tuple[str, ...], tuple[str, ...]], GeneralContactWBCQP] = {}
 
@@ -280,7 +292,7 @@ def main() -> None:
                     mpc_force_ref = mpc_solution.first_contact_forces
                     mpc_status = mpc_solution.status
                     mpc_residual = float(np.linalg.norm(mpc_solution.dynamics_residual))
-                next_mpc_update += MPC_UPDATE_DT
+                next_mpc_update += args.mpc_dt
 
             if sim_time >= next_wbc_update:
                 with profiler.time("wbc"):
@@ -310,6 +322,7 @@ def main() -> None:
                                     kd_base_ori=40.0,
                                     kp_stance=100.0,
                                     kd_stance=20.0,
+                                    use_jdot_v=False,
                                 )
                             )
                         solution = generic_controllers[key].solve(
@@ -331,7 +344,7 @@ def main() -> None:
                     else:
                         solve_failures += 1
                     last_max_tau = float(np.max(np.abs(last_tau)))
-                next_wbc_update += WBC_UPDATE_DT
+                next_wbc_update += args.wbc_dt
 
             robot.data.ctrl[:] = last_tau
 
