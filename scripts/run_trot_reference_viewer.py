@@ -19,9 +19,9 @@ MODEL_PATH = PROJECT_ROOT / "models" / "mujoco_menagerie" / "unitree_go2" / "sce
 
 FOOT_GEOMS = ("FL", "FR", "RL", "RR")
 TROT_PAIRS = (("FL", "RR"), ("FR", "RL"))
-MPC_UPDATE_DT = 0.06
-WBC_UPDATE_DT = 0.012
-VIEWER_HZ = 30.0
+MPC_UPDATE_DT = 0.04
+WBC_UPDATE_DT = 0.008
+VIEWER_SYNC_DT = 1.0 / 60.0
 PROFILE_LOG_DT = 2.0
 MPC_NORMAL_FORCE_MIN = 5.0
 
@@ -68,11 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stance-gap", type=float, default=0.20, help="All-stance gap between diagonal swings.")
     parser.add_argument("--swing-height", type=float, default=0.035, help="Swing clearance in meters.")
     parser.add_argument("--max-step-length", type=float, default=0.035, help="Planar foothold delta limit in meters.")
-    parser.add_argument("--mpc-dt", type=float, default=MPC_UPDATE_DT, help="Simulation time between MPC solves.")
-    parser.add_argument("--wbc-dt", type=float, default=WBC_UPDATE_DT, help="Simulation time between WBC solves.")
-    parser.add_argument("--viewer-hz", type=float, default=VIEWER_HZ, help="Viewer sync rate. Use 0 to sync every step.")
+    parser.add_argument("--viewer-hz", type=float, default=60.0, help="Viewer sync rate. Use 0 to sync every step.")
     parser.add_argument("--profile-dt", type=float, default=PROFILE_LOG_DT, help="Profiler print period in sim seconds.")
-    parser.add_argument("--ignore-jdot-v", action="store_true", help="Approximate Jdot*v as zero inside WBC for faster demo runs.")
     parser.add_argument("--no-sleep", action="store_true", help="Do not sleep to match MuJoCo real-time step.")
     return parser
 
@@ -92,10 +89,6 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--viewer-hz must be non-negative")
     if args.profile_dt < 0.0:
         raise ValueError("--profile-dt must be non-negative")
-    if args.mpc_dt <= 0.0:
-        raise ValueError("--mpc-dt must be positive")
-    if args.wbc_dt <= 0.0:
-        raise ValueError("--wbc-dt must be positive")
 
 
 def main() -> None:
@@ -127,13 +120,7 @@ def main() -> None:
     )
     mpc = CentroidalMPC(mpc_config)
     stance_controller = StanceWBCQP(
-        StanceWBCConfig(
-            foot_geoms=FOOT_GEOMS,
-            weight_force=1.0,
-            kp_stance=100.0,
-            kd_stance=20.0,
-            use_jdot_v=not args.ignore_jdot_v,
-        )
+        StanceWBCConfig(foot_geoms=FOOT_GEOMS, weight_force=1.0, kp_stance=100.0, kd_stance=20.0)
     )
     generic_controllers: dict[tuple[tuple[str, ...], tuple[str, ...]], GeneralContactWBCQP] = {}
 
@@ -166,14 +153,6 @@ def main() -> None:
             np.round(nominal_step_delta, 5).tolist(),
             args.swing_duration,
             args.stance_gap,
-        )
-    )
-    print(
-        "rates: mpc_dt={:.3f}s, wbc_dt={:.3f}s, viewer_hz={:.1f}, use_jdot_v={}".format(
-            args.mpc_dt,
-            args.wbc_dt,
-            args.viewer_hz,
-            not args.ignore_jdot_v,
         )
     )
 
@@ -230,7 +209,7 @@ def main() -> None:
                     mpc_force_ref = mpc_solution.first_contact_forces
                     mpc_status = mpc_solution.status
                     mpc_residual = float(np.linalg.norm(mpc_solution.dynamics_residual))
-                next_mpc_update += args.mpc_dt
+                next_mpc_update += MPC_UPDATE_DT
 
             if sim_time >= next_wbc_update:
                 with profiler.time("wbc"):
@@ -257,7 +236,6 @@ def main() -> None:
                                     kd_swing=42.0,
                                     kp_stance=100.0,
                                     kd_stance=20.0,
-                                    use_jdot_v=not args.ignore_jdot_v,
                                 )
                             )
                         refs = {
@@ -287,7 +265,7 @@ def main() -> None:
                     else:
                         last_tau = np.zeros(robot.nu)
                     last_max_tau = float(np.max(np.abs(last_tau)))
-                next_wbc_update += args.wbc_dt
+                next_wbc_update += WBC_UPDATE_DT
 
             robot.data.ctrl[:] = last_tau
 
