@@ -118,14 +118,15 @@ scripts/run_commanded_crawl_viewer.py
 ## 3. 推荐阅读顺序
 
 1. `README.md`
-2. `docs/control_stack.md`
-3. `scripts/validate_control_stack.py`
-4. `src/mujoco_wbc/model_interface.py`
-5. `src/mujoco_wbc/wbc_qp.py`
-6. `src/mujoco_wbc/centroidal_mpc.py`
-7. `src/mujoco_wbc/swing_trajectory.py`
-8. `scripts/run_trot_reference_viewer.py`
-9. `scripts/record_trot_demo.py`
+2. `docs/python_code_reading_guide.md`
+3. `docs/control_stack.md`
+4. `scripts/validate_control_stack.py`
+5. `src/mujoco_wbc/model_interface.py`
+6. `src/mujoco_wbc/wbc_qp.py`
+7. `src/mujoco_wbc/centroidal_mpc.py`
+8. `src/mujoco_wbc/swing_trajectory.py`
+9. `scripts/run_trot_reference_viewer.py`
+10. `scripts/record_trot_demo.py`
 
 读代码时始终按这几个问题看：
 

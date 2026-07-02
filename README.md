@@ -160,6 +160,7 @@ mujoco_wbc_project/
     ├── control_stack.md
     ├── mainline_architecture.md
     ├── project_structure.md
+    ├── python_code_reading_guide.md
     └── locomotion_reference_map.md
 ```
 
