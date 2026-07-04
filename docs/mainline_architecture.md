@@ -1,10 +1,10 @@
 # Mainline Architecture
 
-项目主链路：
+The main data flow is:
 
 ```text
 MuJoCo Go2 state
-    -> reference / contact schedule
+    -> reference and contact schedule
     -> SRB-MPC
     -> full-body WBC QP
     -> joint torque
@@ -15,45 +15,46 @@ MuJoCo Go2 state
 
 ```text
 MuJoCoModelInterface
-    reads qpos, qvel, contacts
-    computes M, h, B, J, Jdot*v, COM, inertia
+    reads qpos, qvel, and contacts
+    computes M, h, B, J, Jdot*v, COM, and inertia
 
 Reference layer
-    provides COM/base references
-    provides stance/swing schedule
-    provides swing foot trajectories
+    provides COM and base references
+    provides stance/swing contact schedules
+    provides swing-foot trajectories
 
 CentroidalMPC
-    optimizes horizon COM state and foot forces
-    outputs current per-foot force reference
+    optimizes horizon COM state and per-foot contact forces
+    outputs the current per-foot force reference
 
 GeneralContactWBCQP
-    enforces full-body dynamics
+    enforces full-body floating-base dynamics
     enforces stance acceleration constraints
-    tracks swing foot acceleration tasks
-    tracks MPC force reference as a soft cost
+    tracks swing-foot acceleration tasks
+    tracks the MPC force reference as a soft cost
     outputs joint torque tau
 ```
 
 ## Main Demo Path
 
-The clean public demo is:
+The recommended public demo is:
 
 ```text
-scripts/record_trot_demo.py --preset trot-l-route
+scripts/record_trot_demo.py --preset trot-l-turn-stop
 ```
 
-It runs the controller headlessly and stores `qpos/qvel`, then replays or renders
-the stored motion. This separates controller computation speed from visual playback
-smoothness.
+The script runs the controller headlessly and stores `qpos/qvel`, then replays
+or renders the stored motion. This separates controller computation speed from
+visual playback smoothness.
 
 Current route:
 
 ```text
-straight
+straight walking
 left turn
-short recovery pauses
-straight
+short recovery pause
+additional straight walking
+final stop
 ```
 
 Current gait mode:
@@ -65,40 +66,41 @@ diagonal trot contact schedule
 Current limitation:
 
 ```text
-The route is scripted and conservative. It demonstrates the MPC/WBC stack, not a
-production gait planner.
+The route is scripted and conservative. It demonstrates the MPC/WBC stack, not
+a production gait planner.
 ```
 
 ## Why MPC and WBC Are Both Present
 
-MPC sees a simplified centroidal model:
+The MPC sees a simplified centroidal model:
 
 ```text
 state   = [com_pos, com_vel, theta, omega]
 control = per-foot contact forces
 ```
 
-It is good at choosing contact forces over a prediction horizon.
+It chooses contact forces over a prediction horizon while respecting a
+time-varying contact schedule.
 
-WBC sees the full floating-base dynamics:
+The WBC sees the full floating-base dynamics:
 
 ```text
 M(q) vdot + h(q,v) = B tau + J_c(q)^T f
 ```
 
-It is good at turning references and contact forces into physically feasible
+It maps base, swing-foot, and contact-force references into physically feasible
 joint torques under stance, friction, and actuator constraints.
 
-So the split is:
+The split is:
 
 ```text
-MPC: plan centroidal motion and contact force reference
-WBC: realize that reference using the full robot dynamics
+MPC: plan centroidal motion and contact-force references
+WBC: realize those references using the full robot dynamics
 ```
 
 ## Current Research Boundary
 
-This repository is currently an optimization-control locomotion project.
+This repository is currently an optimization-control locomotion prototype.
 
 In scope:
 
@@ -109,6 +111,7 @@ full-body WBC
 contact schedules
 scripted stance/swing references
 stable replay demos
+WBC timing instrumentation
 ```
 
 Out of scope for the current stable branch:
@@ -121,5 +124,5 @@ terrain perception
 fast dynamic gait optimization
 ```
 
-These can be future extensions once the current MPC/WBC project is packaged and
-explained clearly.
+These can be future extensions after the MPC/WBC stack is moved into a more
+real-time-oriented C++ implementation.

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from time import perf_counter
+from typing import Any, Iterator
 
 import numpy as np
 import osqp
@@ -13,6 +15,35 @@ from .model_interface import MuJoCoModelInterface
 
 
 Array = np.ndarray
+
+
+class _WBCSolveProfiler:
+    """Per-solve timing accumulator used by WBC controllers."""
+
+    def __init__(self) -> None:
+        self._sections_s: dict[str, float] = {}
+
+    @contextmanager
+    def time(self, name: str) -> Iterator[None]:
+        start = perf_counter()
+        try:
+            yield
+        finally:
+            self._sections_s[name] = self._sections_s.get(name, 0.0) + perf_counter() - start
+
+    def milliseconds(self, total_start: float) -> dict[str, float]:
+        profile = {name: 1000.0 * value for name, value in self._sections_s.items()}
+        profile["total_solve"] = 1000.0 * (perf_counter() - total_start)
+        return profile
+
+
+@contextmanager
+def _maybe_profile(profiler: _WBCSolveProfiler | None, name: str) -> Iterator[None]:
+    if profiler is None:
+        yield
+        return
+    with profiler.time(name):
+        yield
 
 
 @dataclass(frozen=True)
@@ -129,6 +160,7 @@ class StanceWBCQP:
         self._solver: osqp.OSQP | None = None
         self._problem_shape: tuple[int, int, int] | None = None
         self._last_solution: Array | None = None
+        self.last_profile_ms: dict[str, float] = {}
 
     def solve(
         self,
@@ -138,6 +170,8 @@ class StanceWBCQP:
         force_zero_weights: Array | None = None,
         stance_pos_refs: dict[str, Array] | None = None,
     ) -> StanceWBCSolution:
+        total_start = perf_counter()
+        profiler = _WBCSolveProfiler()
         cfg = self.config
         nv = robot.nv
         nu = robot.nu
@@ -148,20 +182,25 @@ class StanceWBCQP:
         idx_tau = slice(nv, nv + nu)
         idx_force = slice(nv + nu, nvar)
 
-        mass = robot.mass_matrix()
-        h = robot.bias_forces()
-        bmat = robot.actuation_matrix()
-        jc = robot.stacked_geom_jacobian(list(cfg.foot_geoms))
-        jdot_v = (
-            robot.stacked_geom_jdot_v(list(cfg.foot_geoms))
-            if cfg.use_jdot_v
-            else np.zeros(3 * len(cfg.foot_geoms), dtype=float)
-        )
-        stance_acc_cmd = self._stance_accel_cmd(robot, list(cfg.foot_geoms), stance_pos_refs)
-
-        pos_acc_cmd = self._base_position_accel_cmd(robot, qpos_ref)
-        ori_acc_cmd = self._base_orientation_accel_cmd(robot, qpos_ref)
-        joint_acc_cmd = self._joint_accel_cmd(robot, qpos_ref)
+        with profiler.time("mass_matrix"):
+            mass = robot.mass_matrix()
+        with profiler.time("bias_forces"):
+            h = robot.bias_forces()
+        with profiler.time("actuation_matrix"):
+            bmat = robot.actuation_matrix()
+        with profiler.time("stance_jacobian"):
+            jc = robot.stacked_geom_jacobian(list(cfg.foot_geoms))
+        with profiler.time("jdot_v"):
+            jdot_v = (
+                robot.stacked_geom_jdot_v(list(cfg.foot_geoms))
+                if cfg.use_jdot_v
+                else np.zeros(3 * len(cfg.foot_geoms), dtype=float)
+            )
+        with profiler.time("task_commands"):
+            stance_acc_cmd = self._stance_accel_cmd(robot, list(cfg.foot_geoms), stance_pos_refs)
+            pos_acc_cmd = self._base_position_accel_cmd(robot, qpos_ref)
+            ori_acc_cmd = self._base_orientation_accel_cmd(robot, qpos_ref)
+            joint_acc_cmd = self._joint_accel_cmd(robot, qpos_ref)
         force_ref = self._force_reference(robot, len(cfg.foot_geoms)) if force_ref is None else np.asarray(force_ref, dtype=float)
         if force_ref.shape != (nf,):
             raise ValueError(f"force_ref must have shape ({nf},), got {force_ref.shape}")
@@ -169,43 +208,44 @@ class StanceWBCQP:
         if force_zero_weights.shape != (nf,):
             raise ValueError(f"force_zero_weights must have shape ({nf},), got {force_zero_weights.shape}")
 
-        p_diag = np.zeros(nvar)
-        q = np.zeros(nvar)
+        with profiler.time("sparse_assembly"):
+            p_diag = np.zeros(nvar)
+            q = np.zeros(nvar)
 
-        self._add_diagonal_tracking_cost(p_diag, q, slice(0, 3), cfg.weight_base_pos, pos_acc_cmd)
-        self._add_diagonal_tracking_cost(p_diag, q, slice(3, 6), cfg.weight_base_ori, ori_acc_cmd)
-        self._add_diagonal_tracking_cost(p_diag, q, slice(6, nv), cfg.weight_joint_posture, joint_acc_cmd)
+            self._add_diagonal_tracking_cost(p_diag, q, slice(0, 3), cfg.weight_base_pos, pos_acc_cmd)
+            self._add_diagonal_tracking_cost(p_diag, q, slice(3, 6), cfg.weight_base_ori, ori_acc_cmd)
+            self._add_diagonal_tracking_cost(p_diag, q, slice(6, nv), cfg.weight_joint_posture, joint_acc_cmd)
 
-        p_diag[idx_tau] += cfg.weight_tau
-        p_diag[idx_force] += cfg.weight_force + force_zero_weights
-        q[idx_force] += -cfg.weight_force * force_ref
+            p_diag[idx_tau] += cfg.weight_tau
+            p_diag[idx_force] += cfg.weight_force + force_zero_weights
+            q[idx_force] += -cfg.weight_force * force_ref
 
-        p = sparse.diags(p_diag + 1.0e-9, format="csc")
+            p = sparse.diags(p_diag + 1.0e-9, format="csc")
 
-        aeq_dyn = sparse.hstack(
-            [sparse.csc_matrix(mass), sparse.csc_matrix(-bmat), sparse.csc_matrix(-jc.T)],
-            format="csc",
-        )
-        beq_dyn = -h
+            aeq_dyn = sparse.hstack(
+                [sparse.csc_matrix(mass), sparse.csc_matrix(-bmat), sparse.csc_matrix(-jc.T)],
+                format="csc",
+            )
+            beq_dyn = -h
 
-        aeq_stance = sparse.hstack(
-            [
-                sparse.csc_matrix(jc),
-                sparse.csc_matrix((nf, nu)),
-                sparse.csc_matrix((nf, nf)),
-            ],
-            format="csc",
-        )
-        beq_stance = stance_acc_cmd - jdot_v
+            aeq_stance = sparse.hstack(
+                [
+                    sparse.csc_matrix(jc),
+                    sparse.csc_matrix((nf, nu)),
+                    sparse.csc_matrix((nf, nf)),
+                ],
+                format="csc",
+            )
+            beq_stance = stance_acc_cmd - jdot_v
 
-        a_friction, l_friction, u_friction = self._friction_constraints(nv, nu, nf, cfg.friction_mu, cfg.normal_force_min)
-        a_tau, l_tau, u_tau = self._torque_constraints(robot, nv, nu, nf)
+            a_friction, l_friction, u_friction = self._friction_constraints(nv, nu, nf, cfg.friction_mu, cfg.normal_force_min)
+            a_tau, l_tau, u_tau = self._torque_constraints(robot, nv, nu, nf)
 
-        a = sparse.vstack([aeq_dyn, aeq_stance, a_friction, a_tau], format="csc")
-        l = np.concatenate([beq_dyn, beq_stance, l_friction, l_tau])
-        u = np.concatenate([beq_dyn, beq_stance, u_friction, u_tau])
+            a = sparse.vstack([aeq_dyn, aeq_stance, a_friction, a_tau], format="csc")
+            l = np.concatenate([beq_dyn, beq_stance, l_friction, l_tau])
+            u = np.concatenate([beq_dyn, beq_stance, u_friction, u_tau])
 
-        result = self._solve_osqp(p, q, a, l, u)
+        result = self._solve_osqp(p, q, a, l, u, profiler)
 
         if result.x is None:
             z = np.zeros(nvar)
@@ -217,6 +257,7 @@ class StanceWBCQP:
         contact_forces = z[idx_force]
         dynamics_residual = mass @ vdot + h - bmat @ tau - jc.T @ contact_forces
         stance_residual = jc @ vdot + jdot_v - stance_acc_cmd
+        self.last_profile_ms = profiler.milliseconds(total_start)
 
         return StanceWBCSolution(
             status=result.info.status,
@@ -235,28 +276,12 @@ class StanceWBCQP:
         a: sparse.csc_matrix,
         l: Array,
         u: Array,
+        profiler: _WBCSolveProfiler | None = None,
     ) -> Any:
         shape = (p.shape[0], a.shape[0], a.nnz)
         if self._solver is None or self._problem_shape != shape:
             self._solver = osqp.OSQP()
-            self._solver.setup(
-                P=p,
-                q=q,
-                A=a,
-                l=l,
-                u=u,
-                verbose=False,
-                polish=True,
-                warm_starting=True,
-                eps_abs=1.0e-6,
-                eps_rel=1.0e-6,
-            )
-            self._problem_shape = shape
-        else:
-            try:
-                self._solver.update(q=q, l=l, u=u, Px=p.data, Ax=a.data)
-            except ValueError:
-                self._solver = osqp.OSQP()
+            with _maybe_profile(profiler, "osqp_setup"):
                 self._solver.setup(
                     P=p,
                     q=q,
@@ -269,11 +294,32 @@ class StanceWBCQP:
                     eps_abs=1.0e-6,
                     eps_rel=1.0e-6,
                 )
+            self._problem_shape = shape
+        else:
+            try:
+                with _maybe_profile(profiler, "osqp_update"):
+                    self._solver.update(q=q, l=l, u=u, Px=p.data, Ax=a.data)
+            except ValueError:
+                self._solver = osqp.OSQP()
+                with _maybe_profile(profiler, "osqp_setup"):
+                    self._solver.setup(
+                        P=p,
+                        q=q,
+                        A=a,
+                        l=l,
+                        u=u,
+                        verbose=False,
+                        polish=True,
+                        warm_starting=True,
+                        eps_abs=1.0e-6,
+                        eps_rel=1.0e-6,
+                    )
                 self._problem_shape = shape
 
         if self._last_solution is not None and self._last_solution.shape == q.shape:
             self._solver.warm_start(x=self._last_solution)
-        result = self._solver.solve()
+        with _maybe_profile(profiler, "osqp_solve"):
+            result = self._solver.solve()
         if result.x is not None:
             self._last_solution = result.x.copy()
         return result
@@ -398,6 +444,7 @@ class SingleLegSwingWBCQP:
         self._solver: osqp.OSQP | None = None
         self._problem_shape: tuple[int, int, int, int] | None = None
         self._last_solution: Array | None = None
+        self.last_profile_ms: dict[str, float] = {}
 
     def solve(
         self,
@@ -410,6 +457,8 @@ class SingleLegSwingWBCQP:
         force_zero_weights: Array | None = None,
         stance_pos_refs: dict[str, Array] | None = None,
     ) -> SingleLegSwingWBCSolution:
+        total_start = perf_counter()
+        profiler = _WBCSolveProfiler()
         cfg = self.config
         nv = robot.nv
         nu = robot.nu
@@ -423,20 +472,25 @@ class SingleLegSwingWBCQP:
         idx_tau = slice(nv, nv + nu)
         idx_force = slice(nv + nu, nvar)
 
-        mass = robot.mass_matrix()
-        h = robot.bias_forces()
-        bmat = robot.actuation_matrix()
-        jc = robot.stacked_geom_jacobian(list(cfg.stance_foot_geoms))
-        jdot_v = (
-            robot.stacked_geom_jdot_v(list(cfg.stance_foot_geoms))
-            if cfg.use_jdot_v
-            else np.zeros(3 * len(cfg.stance_foot_geoms), dtype=float)
-        )
-        stance_acc_cmd = self._stance_accel_cmd(robot, list(cfg.stance_foot_geoms), stance_pos_refs)
-
-        pos_acc_cmd = self._base_position_accel_cmd(robot, qpos_ref)
-        ori_acc_cmd = self._base_orientation_accel_cmd(robot, qpos_ref)
-        joint_acc_cmd = self._joint_accel_cmd(robot, qpos_ref)
+        with profiler.time("mass_matrix"):
+            mass = robot.mass_matrix()
+        with profiler.time("bias_forces"):
+            h = robot.bias_forces()
+        with profiler.time("actuation_matrix"):
+            bmat = robot.actuation_matrix()
+        with profiler.time("stance_jacobian"):
+            jc = robot.stacked_geom_jacobian(list(cfg.stance_foot_geoms))
+        with profiler.time("jdot_v"):
+            jdot_v = (
+                robot.stacked_geom_jdot_v(list(cfg.stance_foot_geoms))
+                if cfg.use_jdot_v
+                else np.zeros(3 * len(cfg.stance_foot_geoms), dtype=float)
+            )
+        with profiler.time("task_commands"):
+            stance_acc_cmd = self._stance_accel_cmd(robot, list(cfg.stance_foot_geoms), stance_pos_refs)
+            pos_acc_cmd = self._base_position_accel_cmd(robot, qpos_ref)
+            ori_acc_cmd = self._base_orientation_accel_cmd(robot, qpos_ref)
+            joint_acc_cmd = self._joint_accel_cmd(robot, qpos_ref)
         force_ref = (
             self._force_reference(robot, len(cfg.stance_foot_geoms))
             if force_ref is None
@@ -448,67 +502,71 @@ class SingleLegSwingWBCQP:
         if force_zero_weights.shape != (nf,):
             raise ValueError(f"force_zero_weights must have shape ({nf},), got {force_zero_weights.shape}")
 
-        swing_j = robot.geom_jacobian(cfg.swing_foot_geom).jacp
-        swing_jdot_v = robot.geom_jdot_v(cfg.swing_foot_geom) if cfg.use_jdot_v else np.zeros(3, dtype=float)
-        swing_pos = robot.geom_position(cfg.swing_foot_geom)
-        swing_vel = robot.geom_velocity(cfg.swing_foot_geom)
-        swing_acc_cmd = (
-            swing_acc_ref
-            + cfg.kp_swing * (np.asarray(swing_pos_ref, dtype=float) - swing_pos)
-            + cfg.kd_swing * (swing_vel_ref - swing_vel)
-        )
-        swing_target = swing_acc_cmd - swing_jdot_v
+        with profiler.time("swing_jacobian"):
+            swing_j = robot.geom_jacobian(cfg.swing_foot_geom).jacp
+        with profiler.time("jdot_v"):
+            swing_jdot_v = robot.geom_jdot_v(cfg.swing_foot_geom) if cfg.use_jdot_v else np.zeros(3, dtype=float)
+        with profiler.time("task_commands"):
+            swing_pos = robot.geom_position(cfg.swing_foot_geom)
+            swing_vel = swing_j @ robot.data.qvel
+            swing_acc_cmd = (
+                swing_acc_ref
+                + cfg.kp_swing * (np.asarray(swing_pos_ref, dtype=float) - swing_pos)
+                + cfg.kd_swing * (swing_vel_ref - swing_vel)
+            )
+            swing_target = swing_acc_cmd - swing_jdot_v
 
-        p = sparse.lil_matrix((nvar, nvar), dtype=float)
-        q = np.zeros(nvar)
+        with profiler.time("sparse_assembly"):
+            p = sparse.lil_matrix((nvar, nvar), dtype=float)
+            q = np.zeros(nvar)
 
-        self._add_diagonal_tracking_cost(p, q, slice(0, 3), cfg.weight_base_pos, pos_acc_cmd)
-        self._add_diagonal_tracking_cost(p, q, slice(3, 6), cfg.weight_base_ori, ori_acc_cmd)
-        self._add_diagonal_tracking_cost(p, q, slice(6, nv), cfg.weight_joint_posture, joint_acc_cmd)
+            self._add_diagonal_tracking_cost(p, q, slice(0, 3), cfg.weight_base_pos, pos_acc_cmd)
+            self._add_diagonal_tracking_cost(p, q, slice(3, 6), cfg.weight_base_ori, ori_acc_cmd)
+            self._add_diagonal_tracking_cost(p, q, slice(6, nv), cfg.weight_joint_posture, joint_acc_cmd)
 
-        p[idx_tau, idx_tau] = p[idx_tau, idx_tau] + sparse.eye(nu, format="lil") * cfg.weight_tau
-        p[idx_force, idx_force] = p[idx_force, idx_force] + sparse.diags(
-            cfg.weight_force + force_zero_weights,
-            format="lil",
-        )
-        q[idx_force] += -cfg.weight_force * force_ref
+            p[idx_tau, idx_tau] = p[idx_tau, idx_tau] + sparse.eye(nu, format="lil") * cfg.weight_tau
+            p[idx_force, idx_force] = p[idx_force, idx_force] + sparse.diags(
+                cfg.weight_force + force_zero_weights,
+                format="lil",
+            )
+            q[idx_force] += -cfg.weight_force * force_ref
 
-        swing_hessian = cfg.weight_swing_foot * (swing_j.T @ swing_j)
-        p[idx_vdot, idx_vdot] = p[idx_vdot, idx_vdot] + sparse.csc_matrix(swing_hessian)
-        q[idx_vdot] += -cfg.weight_swing_foot * swing_j.T @ swing_target
+            swing_hessian = cfg.weight_swing_foot * (swing_j.T @ swing_j)
+            p[idx_vdot, idx_vdot] = p[idx_vdot, idx_vdot] + sparse.csc_matrix(swing_hessian)
+            q[idx_vdot] += -cfg.weight_swing_foot * swing_j.T @ swing_target
 
-        p = sparse.triu(p + sparse.eye(nvar, format="lil") * 1.0e-9, format="csc")
+            p = sparse.triu(p + sparse.eye(nvar, format="lil") * 1.0e-9, format="csc")
 
-        aeq_dyn = sparse.hstack(
-            [sparse.csc_matrix(mass), sparse.csc_matrix(-bmat), sparse.csc_matrix(-jc.T)],
-            format="csc",
-        )
-        beq_dyn = -h
+            aeq_dyn = sparse.hstack(
+                [sparse.csc_matrix(mass), sparse.csc_matrix(-bmat), sparse.csc_matrix(-jc.T)],
+                format="csc",
+            )
+            beq_dyn = -h
 
-        aeq_stance = sparse.hstack(
-            [
-                sparse.csc_matrix(jc),
-                sparse.csc_matrix((nf, nu)),
-                sparse.csc_matrix((nf, nf)),
-            ],
-            format="csc",
-        )
-        beq_stance = stance_acc_cmd - jdot_v
+            aeq_stance = sparse.hstack(
+                [
+                    sparse.csc_matrix(jc),
+                    sparse.csc_matrix((nf, nu)),
+                    sparse.csc_matrix((nf, nf)),
+                ],
+                format="csc",
+            )
+            beq_stance = stance_acc_cmd - jdot_v
 
-        a_friction, l_friction, u_friction = StanceWBCQP._friction_constraints(
-            nv,
-            nu,
-            nf,
-            cfg.friction_mu,
-            cfg.normal_force_min,
-        )
-        a_tau, l_tau, u_tau = StanceWBCQP._torque_constraints(robot, nv, nu, nf)
+            a_friction, l_friction, u_friction = StanceWBCQP._friction_constraints(
+                nv,
+                nu,
+                nf,
+                cfg.friction_mu,
+                cfg.normal_force_min,
+            )
+            a_tau, l_tau, u_tau = StanceWBCQP._torque_constraints(robot, nv, nu, nf)
 
-        a = sparse.vstack([aeq_dyn, aeq_stance, a_friction, a_tau], format="csc")
-        l = np.concatenate([beq_dyn, beq_stance, l_friction, l_tau])
-        u = np.concatenate([beq_dyn, beq_stance, u_friction, u_tau])
+            a = sparse.vstack([aeq_dyn, aeq_stance, a_friction, a_tau], format="csc")
+            l = np.concatenate([beq_dyn, beq_stance, l_friction, l_tau])
+            u = np.concatenate([beq_dyn, beq_stance, u_friction, u_tau])
 
-        result = self._solve_osqp(p, q, a, l, u)
+        result = self._solve_osqp(p, q, a, l, u, profiler)
 
         z = np.zeros(nvar) if result.x is None else result.x
         vdot = z[idx_vdot]
@@ -517,6 +575,7 @@ class SingleLegSwingWBCQP:
         dynamics_residual = mass @ vdot + h - bmat @ tau - jc.T @ contact_forces
         stance_residual = jc @ vdot + jdot_v - stance_acc_cmd
         swing_accel_error = swing_j @ vdot + swing_jdot_v - swing_acc_cmd
+        self.last_profile_ms = profiler.milliseconds(total_start)
 
         return SingleLegSwingWBCSolution(
             status=result.info.status,
@@ -536,28 +595,12 @@ class SingleLegSwingWBCQP:
         a: sparse.csc_matrix,
         l: Array,
         u: Array,
+        profiler: _WBCSolveProfiler | None = None,
     ) -> Any:
         shape = (p.shape[0], a.shape[0], p.nnz, a.nnz)
         if self._solver is None or self._problem_shape != shape:
             self._solver = osqp.OSQP()
-            self._solver.setup(
-                P=p,
-                q=q,
-                A=a,
-                l=l,
-                u=u,
-                verbose=False,
-                polish=True,
-                warm_starting=True,
-                eps_abs=1.0e-6,
-                eps_rel=1.0e-6,
-            )
-            self._problem_shape = shape
-        else:
-            try:
-                self._solver.update(q=q, l=l, u=u, Px=p.data, Ax=a.data)
-            except ValueError:
-                self._solver = osqp.OSQP()
+            with _maybe_profile(profiler, "osqp_setup"):
                 self._solver.setup(
                     P=p,
                     q=q,
@@ -570,11 +613,32 @@ class SingleLegSwingWBCQP:
                     eps_abs=1.0e-6,
                     eps_rel=1.0e-6,
                 )
+            self._problem_shape = shape
+        else:
+            try:
+                with _maybe_profile(profiler, "osqp_update"):
+                    self._solver.update(q=q, l=l, u=u, Px=p.data, Ax=a.data)
+            except ValueError:
+                self._solver = osqp.OSQP()
+                with _maybe_profile(profiler, "osqp_setup"):
+                    self._solver.setup(
+                        P=p,
+                        q=q,
+                        A=a,
+                        l=l,
+                        u=u,
+                        verbose=False,
+                        polish=True,
+                        warm_starting=True,
+                        eps_abs=1.0e-6,
+                        eps_rel=1.0e-6,
+                    )
                 self._problem_shape = shape
 
         if self._last_solution is not None and self._last_solution.shape == q.shape:
             self._solver.warm_start(x=self._last_solution)
-        result = self._solver.solve()
+        with _maybe_profile(profiler, "osqp_solve"):
+            result = self._solver.solve()
         if result.x is not None:
             self._last_solution = result.x.copy()
         return result
@@ -651,6 +715,7 @@ class GeneralContactWBCQP:
         self._solver: osqp.OSQP | None = None
         self._problem_shape: tuple[int, int, int, int] | None = None
         self._last_solution: Array | None = None
+        self.last_profile_ms: dict[str, float] = {}
 
     def solve(
         self,
@@ -663,6 +728,8 @@ class GeneralContactWBCQP:
         force_zero_weights: Array | None = None,
         stance_pos_refs: dict[str, Array] | None = None,
     ) -> GeneralContactWBCSolution:
+        total_start = perf_counter()
+        profiler = _WBCSolveProfiler()
         cfg = self.config
         if len(cfg.stance_foot_geoms) == 0:
             raise ValueError("GeneralContactWBCQP requires at least one stance foot; flight needs a separate WBC.")
@@ -680,20 +747,25 @@ class GeneralContactWBCQP:
         idx_tau = slice(nv, nv + nu)
         idx_force = slice(nv + nu, nvar)
 
-        mass = robot.mass_matrix()
-        h = robot.bias_forces()
-        bmat = robot.actuation_matrix()
-        jc = robot.stacked_geom_jacobian(list(cfg.stance_foot_geoms))
-        jdot_v = (
-            robot.stacked_geom_jdot_v(list(cfg.stance_foot_geoms))
-            if cfg.use_jdot_v
-            else np.zeros(3 * len(cfg.stance_foot_geoms), dtype=float)
-        )
-        stance_acc_cmd = self._stance_accel_cmd(robot, list(cfg.stance_foot_geoms), stance_pos_refs)
-
-        pos_acc_cmd = self._base_position_accel_cmd(robot, qpos_ref)
-        ori_acc_cmd = self._base_orientation_accel_cmd(robot, qpos_ref)
-        joint_acc_cmd = self._joint_accel_cmd(robot, qpos_ref)
+        with profiler.time("mass_matrix"):
+            mass = robot.mass_matrix()
+        with profiler.time("bias_forces"):
+            h = robot.bias_forces()
+        with profiler.time("actuation_matrix"):
+            bmat = robot.actuation_matrix()
+        with profiler.time("stance_jacobian"):
+            jc = robot.stacked_geom_jacobian(list(cfg.stance_foot_geoms))
+        with profiler.time("jdot_v"):
+            jdot_v = (
+                robot.stacked_geom_jdot_v(list(cfg.stance_foot_geoms))
+                if cfg.use_jdot_v
+                else np.zeros(3 * len(cfg.stance_foot_geoms), dtype=float)
+            )
+        with profiler.time("task_commands"):
+            stance_acc_cmd = self._stance_accel_cmd(robot, list(cfg.stance_foot_geoms), stance_pos_refs)
+            pos_acc_cmd = self._base_position_accel_cmd(robot, qpos_ref)
+            ori_acc_cmd = self._base_orientation_accel_cmd(robot, qpos_ref)
+            joint_acc_cmd = self._joint_accel_cmd(robot, qpos_ref)
         force_ref = (
             self._force_reference(robot, len(cfg.stance_foot_geoms))
             if force_ref is None
@@ -705,73 +777,81 @@ class GeneralContactWBCQP:
         if force_zero_weights.shape != (nf,):
             raise ValueError(f"force_zero_weights must have shape ({nf},), got {force_zero_weights.shape}")
 
-        p = sparse.lil_matrix((nvar, nvar), dtype=float)
-        q = np.zeros(nvar)
-
-        self._add_diagonal_tracking_cost(p, q, slice(0, 3), cfg.weight_base_pos, pos_acc_cmd)
-        self._add_diagonal_tracking_cost(p, q, slice(3, 6), cfg.weight_base_ori, ori_acc_cmd)
-        self._add_diagonal_tracking_cost(p, q, slice(6, nv), cfg.weight_joint_posture, joint_acc_cmd)
-
-        p[idx_tau, idx_tau] = p[idx_tau, idx_tau] + sparse.eye(nu, format="lil") * cfg.weight_tau
-        p[idx_force, idx_force] = p[idx_force, idx_force] + sparse.diags(
-            cfg.weight_force + force_zero_weights,
-            format="lil",
-        )
-        q[idx_force] += -cfg.weight_force * force_ref
-
+        swing_tasks = []
         swing_errors = []
         for foot in cfg.swing_foot_geoms:
-            swing_pos_ref = np.asarray(swing_pos_refs.get(foot, robot.geom_position(foot)), dtype=float)
-            swing_vel_ref = np.asarray(swing_vel_refs.get(foot, np.zeros(3)), dtype=float)
-            swing_acc_ref = np.asarray(swing_acc_refs.get(foot, np.zeros(3)), dtype=float)
-            swing_j = robot.geom_jacobian(foot).jacp
-            swing_jdot_v = robot.geom_jdot_v(foot) if cfg.use_jdot_v else np.zeros(3, dtype=float)
-            swing_pos = robot.geom_position(foot)
-            swing_vel = robot.geom_velocity(foot)
-            swing_acc_cmd = (
-                swing_acc_ref
-                + cfg.kp_swing * (swing_pos_ref - swing_pos)
-                + cfg.kd_swing * (swing_vel_ref - swing_vel)
-            )
-            swing_target = swing_acc_cmd - swing_jdot_v
-            p[idx_vdot, idx_vdot] = p[idx_vdot, idx_vdot] + sparse.csc_matrix(
-                cfg.weight_swing_foot * (swing_j.T @ swing_j)
-            )
-            q[idx_vdot] += -cfg.weight_swing_foot * swing_j.T @ swing_target
+            with profiler.time("swing_jacobian"):
+                swing_j = robot.geom_jacobian(foot).jacp
+            with profiler.time("jdot_v"):
+                swing_jdot_v = robot.geom_jdot_v(foot) if cfg.use_jdot_v else np.zeros(3, dtype=float)
+            with profiler.time("task_commands"):
+                swing_pos_default = robot.geom_position(foot)
+                swing_pos_ref = np.asarray(swing_pos_refs.get(foot, swing_pos_default), dtype=float)
+                swing_vel_ref = np.asarray(swing_vel_refs.get(foot, np.zeros(3)), dtype=float)
+                swing_acc_ref = np.asarray(swing_acc_refs.get(foot, np.zeros(3)), dtype=float)
+                swing_vel = swing_j @ robot.data.qvel
+                swing_acc_cmd = (
+                    swing_acc_ref
+                    + cfg.kp_swing * (swing_pos_ref - swing_pos_default)
+                    + cfg.kd_swing * (swing_vel_ref - swing_vel)
+                )
+                swing_target = swing_acc_cmd - swing_jdot_v
+            swing_tasks.append((swing_j, swing_target))
             swing_errors.append((foot, swing_j, swing_jdot_v, swing_acc_cmd))
 
-        p = sparse.triu(p + sparse.eye(nvar, format="lil") * 1.0e-9, format="csc")
+        with profiler.time("sparse_assembly"):
+            p = sparse.lil_matrix((nvar, nvar), dtype=float)
+            q = np.zeros(nvar)
 
-        aeq_dyn = sparse.hstack(
-            [sparse.csc_matrix(mass), sparse.csc_matrix(-bmat), sparse.csc_matrix(-jc.T)],
-            format="csc",
-        )
-        beq_dyn = -h
+            self._add_diagonal_tracking_cost(p, q, slice(0, 3), cfg.weight_base_pos, pos_acc_cmd)
+            self._add_diagonal_tracking_cost(p, q, slice(3, 6), cfg.weight_base_ori, ori_acc_cmd)
+            self._add_diagonal_tracking_cost(p, q, slice(6, nv), cfg.weight_joint_posture, joint_acc_cmd)
 
-        aeq_stance = sparse.hstack(
-            [
-                sparse.csc_matrix(jc),
-                sparse.csc_matrix((nf, nu)),
-                sparse.csc_matrix((nf, nf)),
-            ],
-            format="csc",
-        )
-        beq_stance = stance_acc_cmd - jdot_v
+            p[idx_tau, idx_tau] = p[idx_tau, idx_tau] + sparse.eye(nu, format="lil") * cfg.weight_tau
+            p[idx_force, idx_force] = p[idx_force, idx_force] + sparse.diags(
+                cfg.weight_force + force_zero_weights,
+                format="lil",
+            )
+            q[idx_force] += -cfg.weight_force * force_ref
 
-        a_friction, l_friction, u_friction = StanceWBCQP._friction_constraints(
-            nv,
-            nu,
-            nf,
-            cfg.friction_mu,
-            cfg.normal_force_min,
-        )
-        a_tau, l_tau, u_tau = StanceWBCQP._torque_constraints(robot, nv, nu, nf)
+            for swing_j, swing_target in swing_tasks:
+                p[idx_vdot, idx_vdot] = p[idx_vdot, idx_vdot] + sparse.csc_matrix(
+                    cfg.weight_swing_foot * (swing_j.T @ swing_j)
+                )
+                q[idx_vdot] += -cfg.weight_swing_foot * swing_j.T @ swing_target
 
-        a = sparse.vstack([aeq_dyn, aeq_stance, a_friction, a_tau], format="csc")
-        l = np.concatenate([beq_dyn, beq_stance, l_friction, l_tau])
-        u = np.concatenate([beq_dyn, beq_stance, u_friction, u_tau])
+            p = sparse.triu(p + sparse.eye(nvar, format="lil") * 1.0e-9, format="csc")
 
-        result = self._solve_osqp(p, q, a, l, u)
+            aeq_dyn = sparse.hstack(
+                [sparse.csc_matrix(mass), sparse.csc_matrix(-bmat), sparse.csc_matrix(-jc.T)],
+                format="csc",
+            )
+            beq_dyn = -h
+
+            aeq_stance = sparse.hstack(
+                [
+                    sparse.csc_matrix(jc),
+                    sparse.csc_matrix((nf, nu)),
+                    sparse.csc_matrix((nf, nf)),
+                ],
+                format="csc",
+            )
+            beq_stance = stance_acc_cmd - jdot_v
+
+            a_friction, l_friction, u_friction = StanceWBCQP._friction_constraints(
+                nv,
+                nu,
+                nf,
+                cfg.friction_mu,
+                cfg.normal_force_min,
+            )
+            a_tau, l_tau, u_tau = StanceWBCQP._torque_constraints(robot, nv, nu, nf)
+
+            a = sparse.vstack([aeq_dyn, aeq_stance, a_friction, a_tau], format="csc")
+            l = np.concatenate([beq_dyn, beq_stance, l_friction, l_tau])
+            u = np.concatenate([beq_dyn, beq_stance, u_friction, u_tau])
+
+        result = self._solve_osqp(p, q, a, l, u, profiler)
 
         z = np.zeros(nvar) if result.x is None else result.x
         vdot = z[idx_vdot]
@@ -784,6 +864,7 @@ class GeneralContactWBCQP:
             if swing_errors
             else np.zeros(0)
         )
+        self.last_profile_ms = profiler.milliseconds(total_start)
 
         return GeneralContactWBCSolution(
             status=result.info.status,
@@ -805,28 +886,12 @@ class GeneralContactWBCQP:
         a: sparse.csc_matrix,
         l: Array,
         u: Array,
+        profiler: _WBCSolveProfiler | None = None,
     ) -> Any:
         shape = (p.shape[0], a.shape[0], p.nnz, a.nnz)
         if self._solver is None or self._problem_shape != shape:
             self._solver = osqp.OSQP()
-            self._solver.setup(
-                P=p,
-                q=q,
-                A=a,
-                l=l,
-                u=u,
-                verbose=False,
-                polish=True,
-                warm_starting=True,
-                eps_abs=1.0e-6,
-                eps_rel=1.0e-6,
-            )
-            self._problem_shape = shape
-        else:
-            try:
-                self._solver.update(q=q, l=l, u=u, Px=p.data, Ax=a.data)
-            except ValueError:
-                self._solver = osqp.OSQP()
+            with _maybe_profile(profiler, "osqp_setup"):
                 self._solver.setup(
                     P=p,
                     q=q,
@@ -839,11 +904,32 @@ class GeneralContactWBCQP:
                     eps_abs=1.0e-6,
                     eps_rel=1.0e-6,
                 )
+            self._problem_shape = shape
+        else:
+            try:
+                with _maybe_profile(profiler, "osqp_update"):
+                    self._solver.update(q=q, l=l, u=u, Px=p.data, Ax=a.data)
+            except ValueError:
+                self._solver = osqp.OSQP()
+                with _maybe_profile(profiler, "osqp_setup"):
+                    self._solver.setup(
+                        P=p,
+                        q=q,
+                        A=a,
+                        l=l,
+                        u=u,
+                        verbose=False,
+                        polish=True,
+                        warm_starting=True,
+                        eps_abs=1.0e-6,
+                        eps_rel=1.0e-6,
+                    )
                 self._problem_shape = shape
 
         if self._last_solution is not None and self._last_solution.shape == q.shape:
             self._solver.warm_start(x=self._last_solution)
-        result = self._solver.solve()
+        with _maybe_profile(profiler, "osqp_solve"):
+            result = self._solver.solve()
         if result.x is not None:
             self._last_solution = result.x.copy()
         return result

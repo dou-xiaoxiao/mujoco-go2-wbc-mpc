@@ -1,19 +1,20 @@
-# Control Stack / 控制栈说明
+# Control Stack
 
-当前主线：
+The stable control pipeline is:
 
 ```text
-planner / reference
+reference and contact schedule
     -> SRB-MPC
     -> full-body WBC QP
     -> MuJoCo torque control
 ```
 
-这个文档只说明稳定主链路，不包含已经删除的早期实验脚本。
+This document describes the main optimized-control path used by the current
+repository. It does not cover early experimental scripts or tuning notes.
 
 ## 1. MuJoCo State
 
-Unitree Go2 是 floating-base 模型：
+The Unitree Go2 model is represented as a floating-base system:
 
 ```text
 qpos[0:3] = base position, expressed in world frame
@@ -25,7 +26,7 @@ qvel[3:6] = base angular velocity, expressed in world frame
 qvel[6:]  = 12 joint velocities
 ```
 
-维度：
+Dimensions:
 
 ```text
 nq = 19
@@ -33,66 +34,68 @@ nv = 18
 nu = 12
 ```
 
-足端 Jacobian 约定：
+Foot Jacobian convention:
 
 ```text
 v_foot = J_foot(q) v
 a_foot = J_foot(q) vdot + Jdot_foot(q,v) v
 ```
 
-接触力约定：
+Contact-force convention:
 
 ```text
 f_foot = [fx, fy, fz], expressed in world frame
 generalized contact force = J_foot(q)^T f_foot
 ```
 
-## 2. Planner / Reference Layer
+## 2. Reference Layer
 
-这个项目的 planner 很薄，只负责给 MPC/WBC 提供 reference：
+The current reference layer is intentionally lightweight. It provides:
 
 ```text
 contact schedule
-swing foot start / target foothold
-swing foot position / velocity / acceleration reference
-base position / orientation reference
-COM position / velocity reference
+swing-foot start and target foothold
+swing-foot position, velocity, and acceleration reference
+base position and orientation reference
+COM position and velocity reference
 ```
 
-目前最稳定的 trot route demo 仍然是脚本化 reference，不是成熟自主 gait planner：
+The public route demo uses scripted references:
 
 ```text
-直走
-左转
-短暂停顿恢复
-继续直走
+straight walking
+left turn
+short recovery pause
+additional straight walking
+final stop
 ```
 
-这也是项目当前的边界：控制层已经搭好，planner 仍然是后续工作。
+The planner is intentionally conservative and is not presented as a production
+gait planner.
 
 ## 3. SRB-MPC
 
-文件：
+Implementation:
 
 ```text
 src/mujoco_wbc/centroidal_mpc.py
 ```
 
-SRB = single rigid body。MPC 使用整机 COM 和简化姿态动力学：
+The MPC uses a single-rigid-body model of the robot:
 
 ```text
 x = [com_pos, com_vel, theta, omega]
 u = [f_FL, f_FR, f_RL, f_RR]
 ```
 
-优化变量：
+Optimization variables:
 
 ```text
 X[0:N]    predicted centroidal states
 F[0:N-1]  predicted contact forces
 ```
 
-动力学：
+Discrete dynamics:
 
 ```text
 p[k+1]     = p[k] + dt v[k]
@@ -101,7 +104,7 @@ theta[k+1] = theta[k] + dt omega[k]
 omega[k+1] = omega[k] + dt I_W^-1 sum_i (p_i - com) x f_i[k]
 ```
 
-约束：
+Contact constraints:
 
 ```text
 stance foot:
@@ -113,72 +116,74 @@ swing foot:
   fx = fy = fz = 0
 ```
 
-代价函数：
+Cost terms:
 
 ```text
-track COM position
-track COM velocity
-track small-angle orientation
-track angular velocity
-regularize contact force
-regularize force rate over horizon
+COM position tracking
+COM velocity tracking
+small-angle orientation tracking
+angular velocity tracking
+contact-force regularization
+force-rate regularization
 ```
 
-输出：
+Output:
 
 ```text
-first-knot per-foot force reference
+first-knot per-foot contact-force reference
 ```
 
-MPC 的 `f_i` 不是直接施加到仿真里的力，而是传给 WBC 的接触力参考。
+The MPC force is not applied directly to the simulator. It is passed to the WBC
+as a contact-force reference.
 
 ## 4. Full-Body WBC QP
 
-文件：
+Implementation:
 
 ```text
 src/mujoco_wbc/wbc_qp.py
 ```
 
-决策变量：
+Decision variable:
 
 ```text
 z = [vdot, tau, f]
 ```
 
-含义：
+where:
 
 ```text
-vdot ∈ R^18    generalized acceleration
-tau  ∈ R^12    joint torque
-f    ∈ R^(3nc) stance foot contact forces
+vdot in R^18    generalized acceleration
+tau  in R^12    joint torque
+f    in R^(3nc) stance-foot contact forces
 ```
 
-硬动力学约束：
+Floating-base dynamics constraint:
 
 ```text
 M(q) vdot + h(q,v) = B tau + J_c(q)^T f
 ```
 
-stance 约束：
+Stance acceleration constraint:
 
 ```text
 J_c(q) vdot + Jdot_c(q,v) v = a_c_cmd
 ```
 
-其中 `a_c_cmd` 可以是 0，也可以是足端位置反馈生成的加速度命令：
+The stance acceleration command can be zero or a Cartesian foot-position
+feedback command:
 
 ```text
 a_c_cmd = kp (p_ref - p_foot) + kd (0 - v_foot)
 ```
 
-swing 足是软任务：
+Swing feet are tracked as soft acceleration tasks:
 
 ```text
 J_sw vdot + Jdot_sw v ~= xddot_ref
 ```
 
-摩擦和力矩约束：
+Friction and torque constraints:
 
 ```text
 |fx| <= mu fz
@@ -187,86 +192,87 @@ fz >= 0
 tau_min <= tau <= tau_max
 ```
 
-代价函数：
+Cost terms:
 
 ```text
-base position/orientation acceleration tracking
+base position and orientation acceleration tracking
 joint posture tracking
-swing foot acceleration tracking
-MPC force reference tracking
+swing-foot acceleration tracking
+MPC force-reference tracking
 torque regularization
-contact force regularization
+contact-force regularization
 ```
 
-输出：
+Output:
 
 ```text
-tau
+joint torque tau
 ```
 
 ## 5. Contact Modes
 
-四脚 stance：
+Four-foot stance:
 
 ```text
-MPC: all four feet can generate force
+MPC: all four feet can generate contact force
 WBC: all four feet are stance constraints
 ```
 
-单腿 swing：
+Single-leg swing:
 
 ```text
-MPC: swing foot force is zero
-WBC: swing foot leaves contact constraints and becomes a swing task
+MPC: swing-foot force is constrained to zero
+WBC: swing foot becomes a swing task and leaves the stance constraints
 ```
 
-Diagonal trot：
+Diagonal trot:
 
 ```text
 MPC: two stance feet can generate force, two swing feet are force-zero
-WBC: two stance constraints + two swing tasks
+WBC: two stance constraints and two swing tasks
 ```
 
-当前 `GeneralContactWBCQP` 支持任意非腾空接触模式，所以 crawl 和 trot 都使用同一类
-WBC，而不是为每种 gait 写一套独立控制器。
+`GeneralContactWBCQP` supports arbitrary non-flight contact modes, so crawl and
+diagonal trot can share the same WBC implementation.
 
 ## 6. Stable Baseline
 
-当前稳定基线：
+Current validated baseline:
 
 ```text
-1. static four-foot stance WBC
-2. single-leg swing WBC
-3. general contact WBC: crawl mode
-4. general contact WBC: diagonal trot mode
-5. SRB-MPC force reference with time-varying contact schedule
-6. offline trot route replay demo
+static four-foot stance WBC
+single-leg swing WBC
+general contact WBC in crawl mode
+general contact WBC in diagonal trot mode
+SRB-MPC force reference with time-varying contact schedules
+offline trot route replay demo
 ```
 
-回归命令：
+Regression command:
 
 ```powershell
 .\.venv\Scripts\python.exe -B .\scripts\validate_control_stack.py
 ```
 
-展示命令：
+Replay command:
 
 ```powershell
-.\.venv\Scripts\python.exe .\scripts\record_trot_demo.py --preset trot-l-route --no-gif --viewer-replay
+.\.venv\Scripts\python.exe -B .\scripts\record_trot_demo.py --preset trot-l-turn-stop --no-gif --viewer-replay
 ```
 
 ## 7. Known Limitations
 
-当前没有声称解决：
+The current Python prototype does not claim to solve:
 
 ```text
-real-time performance
+real-time deployment
 hardware state estimation
-sim2real
-robust touchdown/load transfer
+hardware sim-to-real transfer
+robust touchdown and load transfer
 natural high-speed trot
 terrain adaptation
 RL policy training
 ```
 
-这些是后续方向。当前项目的价值是：完整、可解释地搭出 MPC/WBC locomotion 控制链路。
+The value of the current repository is a compact, inspectable MPC/WBC
+locomotion stack built directly on MuJoCo dynamics and kinematics.

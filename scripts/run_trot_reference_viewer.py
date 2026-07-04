@@ -72,6 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mpc-dt", type=float, default=MPC_UPDATE_DT, help="MPC update period in seconds.")
     parser.add_argument("--wbc-dt", type=float, default=WBC_UPDATE_DT, help="WBC update period in seconds.")
     parser.add_argument("--profile-dt", type=float, default=PROFILE_LOG_DT, help="Profiler print period in sim seconds.")
+    parser.add_argument("--wbc-profile", action="store_true", help="Print per-solve WBC internal timing.")
     parser.add_argument("--touchdown-z-tol", type=float, default=0.018, help="Foot-point z tolerance for trot touchdown.")
     parser.add_argument("--touchdown-extra-time", type=float, default=0.25, help="Maximum extra swing time while waiting for touchdown.")
     parser.add_argument("--start-roll-tol", type=float, default=0.04, help="Maximum absolute roll before starting the next trot swing.")
@@ -174,6 +175,7 @@ def main() -> None:
     last_dyn_residual = 0.0
     last_stance_residual = 0.0
     last_swing_error = 0.0
+    last_wbc_profile: dict[str, float] = {}
     profiler = LoopProfiler()
     profile_wall_start = time.perf_counter()
     profile_sim_start = 0.0
@@ -302,7 +304,8 @@ def main() -> None:
             if sim_time >= next_wbc_update:
                 with profiler.time("wbc"):
                     if current_window is None:
-                        solution = stance_controller.solve(
+                        active_wbc = stance_controller
+                        solution = active_wbc.solve(
                             robot,
                             base_ref,
                             force_ref=mpc_force_ref,
@@ -330,7 +333,8 @@ def main() -> None:
                                     use_jdot_v=False,
                                 )
                             )
-                        solution = generic_controllers[key].solve(
+                        active_wbc = generic_controllers[key]
+                        solution = active_wbc.solve(
                             robot,
                             base_ref,
                             swing_pos_refs={foot: ref.position for foot, ref in swing_refs.items()},
@@ -340,6 +344,9 @@ def main() -> None:
                             stance_pos_refs={foot: locked_positions[foot] for foot in stance_feet},
                         )
 
+                    last_wbc_profile = getattr(active_wbc, "last_profile_ms", {})
+                    if args.wbc_profile:
+                        print(f"wbc_profile t={sim_time:.3f}s " + format_wbc_profile(last_wbc_profile))
                     last_wbc_status = solution.status
                     if solution.status in ("solved", "solved inaccurate") and mpc_status in ("solved", "solved inaccurate"):
                         last_tau = solution.tau.copy()
@@ -568,6 +575,25 @@ def force_ref_for_feet(force_ref_all: np.ndarray, selected_feet: tuple[str, ...]
         for foot, force in zip(FOOT_GEOMS, force_ref_all.reshape(len(FOOT_GEOMS), 3))
     }
     return np.vstack([forces_by_foot[foot] for foot in selected_feet]).reshape(-1)
+
+
+def format_wbc_profile(profile_ms: dict[str, float]) -> str:
+    ordered_keys = (
+        "mass_matrix",
+        "bias_forces",
+        "actuation_matrix",
+        "stance_jacobian",
+        "swing_jacobian",
+        "jdot_v",
+        "task_commands",
+        "sparse_assembly",
+        "osqp_setup",
+        "osqp_update",
+        "osqp_solve",
+        "total_solve",
+    )
+    parts = [f"{key}={profile_ms[key]:.3f}ms" for key in ordered_keys if key in profile_ms]
+    return " ".join(parts)
 
 
 if __name__ == "__main__":

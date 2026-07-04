@@ -39,6 +39,7 @@ def main() -> None:
     robot = MuJoCoModelInterface(MODEL_PATH)
     robot.set_keyframe("home")
 
+    checks.append(check_actuation_matrix_cache(robot))
     checks.append(check_phase_semantics())
     checks.append(check_stance_wbc(robot))
     checks.append(check_single_leg_swing_wbc(robot))
@@ -88,6 +89,11 @@ def check_phase_semantics() -> tuple[str, bool, str]:
 
     ok = before_touchdown == "swing" and after_touchdown == "stance" and fl_column == [False, False, False, True]
     return "contact phase semantics", ok, f"phase=({before_touchdown}, {after_touchdown}), FL={fl_column}"
+
+
+def check_actuation_matrix_cache(robot: MuJoCoModelInterface) -> tuple[str, bool, str]:
+    ok, max_error = robot.check_actuation_matrix_cache(atol=1.0e-12)
+    return "actuation matrix cache", ok, f"max_abs_error={max_error:.2e}"
 
 
 def check_stance_wbc(robot: MuJoCoModelInterface) -> tuple[str, bool, str]:

@@ -1,21 +1,22 @@
-# Project Structure / 读码顺序
+# Project Structure
 
-这个项目按“核心库”和“运行入口”分开：
+The repository separates reusable control code, executable scripts, model
+assets, and documentation:
 
 ```text
-src/mujoco_wbc/  可复用控制库
-scripts/         可执行脚本和 demo
-models/          MuJoCo XML / mesh 资源
-docs/            架构、数学接口、读码说明
+src/mujoco_wbc/  reusable control library
+scripts/         executable checks, demos, and viewers
+models/          MuJoCo XML and mesh assets
+docs/            architecture and mathematical interface notes
 ```
 
-## 1. 核心库
+## 1. Core Library
 
 ```text
 src/mujoco_wbc/model_interface.py
 ```
 
-MuJoCo 包装层。负责从仿真中拿到控制器需要的动力学和运动学量：
+MuJoCo dynamics and kinematics wrapper. It exposes:
 
 ```text
 q, v
@@ -29,45 +30,50 @@ base rotation
 foot contact positions
 ```
 
-这是 MuJoCo 和控制数学之间的接口。
+This file is the boundary between MuJoCo simulation data and the controller
+mathematical interface.
 
 ```text
 src/mujoco_wbc/centroidal_mpc.py
 ```
 
-SRB-MPC。用简化的 centroidal / single rigid body 模型优化预测窗口内的
-COM 状态和每条腿接触力。
+Single-rigid-body MPC. It optimizes predicted COM states and per-foot contact
+forces over a finite horizon.
 
 ```text
 src/mujoco_wbc/wbc_qp.py
 ```
 
-Full-body WBC QP。决策变量是：
+Full-body WBC QP. The decision variable is:
 
 ```text
 z = [vdot, tau, f]
 ```
 
-它在完整 floating-base 动力学约束下求关节力矩 `tau`。
+The QP computes joint torque commands while enforcing floating-base dynamics,
+stance constraints, torque limits, and friction constraints.
 
 ```text
 src/mujoco_wbc/contact_schedule.py
 ```
 
-接触相位工具。负责表达哪些脚是 stance，哪些脚是 swing。
+Contact-phase helpers. These functions express which feet are in stance and
+which feet are in swing over the current time and MPC horizon.
 
 ```text
 src/mujoco_wbc/swing_trajectory.py
 ```
 
-足端 swing 轨迹。输入起点、落点、抬脚高度、时间，输出足端位置、速度、加速度参考。
+Swing-foot trajectory generation. Given a start point, target point, swing
+height, and timing, it returns position, velocity, and acceleration references.
 
 ```text
 src/mujoco_wbc/planning.py
 ```
 
-简单 crawl planner。它不是成熟 gait planner，而是提供一条从速度命令到 foothold /
-body reference 的最小链路。
+Minimal command and reference helpers. This file provides a simple path from
+velocity commands to foothold and body references. It is intentionally not a
+production gait planner.
 
 ```text
 src/mujoco_wbc/reference_inputs.py
@@ -76,11 +82,12 @@ src/mujoco_wbc/profiling.py
 src/mujoco_wbc/conventions.py
 ```
 
-辅助模块：reference 数据结构、支撑几何、计时 profiler、坐标约定。
+Supporting modules for reference validation, support geometry, timing, and
+coordinate/name conventions.
 
-## 2. 正式脚本入口
+## 2. Executable Scripts
 
-环境和模型检查：
+Environment and model checks:
 
 ```text
 scripts/check_mujoco_install.py
@@ -89,13 +96,13 @@ scripts/inspect_go2_dynamics.py
 scripts/inspect_frame_conventions.py
 ```
 
-控制器回归：
+Control-stack regression:
 
 ```text
 scripts/validate_control_stack.py
 ```
 
-基础 WBC demo：
+Basic WBC demos:
 
 ```text
 scripts/run_static_stance_once.py
@@ -104,7 +111,7 @@ scripts/run_single_leg_swing_once.py
 scripts/run_single_leg_swing_viewer.py
 ```
 
-主要 locomotion demo：
+Main locomotion demos:
 
 ```text
 scripts/record_trot_demo.py
@@ -112,14 +119,17 @@ scripts/run_trot_reference_viewer.py
 scripts/run_commanded_crawl_viewer.py
 ```
 
-`record_trot_demo.py` 是当前最适合展示的入口。它先离线 rollout，再固定帧率回放，
-避免 live viewer 被 Python QP 求解拖慢。
+`record_trot_demo.py` is the preferred public demonstration entry point. It
+first performs a headless closed-loop rollout, then replays the stored states at
+a fixed visual frame rate.
 
-## 3. 推荐阅读顺序
+## 3. Recommended Review Order
+
+For understanding the implementation:
 
 1. `README.md`
-2. `docs/python_code_reading_guide.md`
-3. `docs/control_stack.md`
+2. `docs/control_stack.md`
+3. `docs/mainline_architecture.md`
 4. `scripts/validate_control_stack.py`
 5. `src/mujoco_wbc/model_interface.py`
 6. `src/mujoco_wbc/wbc_qp.py`
@@ -128,18 +138,18 @@ scripts/run_commanded_crawl_viewer.py
 9. `scripts/run_trot_reference_viewer.py`
 10. `scripts/record_trot_demo.py`
 
-读代码时始终按这几个问题看：
+The important questions for each module are:
 
 ```text
-state 是什么？
-input 是什么？
-decision variable 是什么？
-cost 是什么？
-constraint 是什么？
-output 给谁？
+What is the state?
+What is the input?
+What is the decision variable?
+What is the cost?
+What is the constraint?
+Who consumes the output?
 ```
 
-对应到本项目：
+Module-level mapping:
 
 ```text
 model_interface.py
@@ -158,43 +168,11 @@ wbc_qp.py
 
 viewer/demo scripts
   input: command/reference parameters
-  output: MuJoCo simulation or replay
+  output: MuJoCo simulation, replay, or rendered GIF
 ```
 
-## 4. Python 结构速记
+## 4. Public Documentation
 
-字典常用于每条腿的数据：
-
-```python
-foot_positions = {
-    foot: robot.geom_position(foot)
-    for foot in FOOT_GEOMS
-}
-```
-
-元组常用于固定顺序：
-
-```python
-FOOT_GEOMS = ("FL", "FR", "RL", "RR")
-```
-
-dataclass 常用于配置、窗口、求解结果：
-
-```python
-@dataclass(frozen=True)
-class DemoWindow:
-    swing_feet: tuple[str, ...]
-    start_time: float
-    duration: float
-```
-
-NumPy 切片常用于 floating-base 状态：
-
-```python
-base_pos = qpos[0:3]
-base_quat = qpos[3:7]
-joint_pos = qpos[7:]
-```
-
-`if __name__ == "__main__": main()` 表示：只有直接运行这个 `.py` 文件时才执行
-`main()`；被其他文件 import 时不会自动运行。
+The public documentation is kept focused on the control architecture and
+mathematical interfaces. Personal study notes and language-learning material
+are intentionally excluded from the repository documentation.

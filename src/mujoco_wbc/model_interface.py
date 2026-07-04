@@ -42,6 +42,7 @@ class MuJoCoModelInterface:
         self.base_body_name = BASE_BODY_NAME
         self.base_body_id = self._body_id(self.base_body_name)
         mujoco.mj_forward(self.model, self.data)
+        self._actuation_matrix_cached = self.actuation_matrix_uncached()
 
     @property
     def nq(self) -> int:
@@ -99,7 +100,21 @@ class MuJoCoModelInterface:
         return self.data.qfrc_bias.copy() - self.data.qfrc_passive.copy()
 
     def actuation_matrix(self) -> Array:
-        """Return B such that qfrc_actuator = B tau for unit motor controls."""
+        """Return cached B such that qfrc_actuator = B tau.
+
+        For the Go2 MuJoCo model used here, the actuators are joint motors
+        with fixed moment arms, so B is constant. The uncached finite
+        difference-style computation is kept for debugging and validation.
+        """
+
+        return self._actuation_matrix_cached.copy()
+
+    def actuation_matrix_uncached(self) -> Array:
+        """Compute B by applying one unit motor command per actuator.
+
+        This is intentionally expensive: it calls mj_forward once for each
+        actuator. Use actuation_matrix() in the control loop.
+        """
 
         original_ctrl = self.data.ctrl.copy()
         original_qacc = self.data.qacc.copy()
@@ -118,6 +133,13 @@ class MuJoCoModelInterface:
         self.data.qacc[:] = original_qacc
         mujoco.mj_forward(self.model, self.data)
         return matrix
+
+    def check_actuation_matrix_cache(self, atol: float = 1.0e-12) -> tuple[bool, float]:
+        """Compare cached B with the current-state uncached computation."""
+
+        uncached = self.actuation_matrix_uncached()
+        max_abs_error = float(np.max(np.abs(self._actuation_matrix_cached - uncached)))
+        return max_abs_error <= atol, max_abs_error
 
     def actuator_forces(self) -> Array:
         return self.data.qfrc_actuator.copy()
