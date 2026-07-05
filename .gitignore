@@ -32,5 +32,6 @@ frames/
 
 # Native build artifacts
 build/
+cpp/build*/
 dist/
 *.egg-info/

@@ -34,6 +34,8 @@ MuJoCo floating-base state
   independent of Python QP runtime.
 - Basic profiling hooks for the WBC solve path and cached actuation matrix
   support for the Go2 MuJoCo model.
+- A plain C++ MPC/WBC implementation using Eigen, the MuJoCo C API, and the
+  OSQP C API for headless speed checks.
 
 ## Demo
 
@@ -141,6 +143,43 @@ WBC internal timing in the live viewer:
 .\.venv\Scripts\python.exe -B .\scripts\run_trot_reference_viewer.py --vx 0.012 --wbc-profile
 ```
 
+## C++ Implementation
+
+The `cpp/` directory contains a real C++ implementation of the same control
+pipeline:
+
+```text
+MuJoCo model interface
+    -> SRB-MPC QP solved by OSQP C API
+    -> full-body WBC QP solved by OSQP C API
+    -> torque command
+    -> MuJoCo step
+```
+
+Build and run:
+
+```powershell
+$env:Path = "D:\projects\quadruped_project\tools\w64devkit\bin;" + $env:Path
+.\..\tools\w64devkit\bin\cmake.exe -S cpp -B cpp\build-osqp -G Ninja "-DCMAKE_CXX_COMPILER=g++.exe" "-DCMAKE_MAKE_PROGRAM=D:\projects\quadruped_project\tools\w64devkit\bin\ninja.exe"
+.\..\tools\w64devkit\bin\cmake.exe --build cpp\build-osqp --config Release
+
+.\cpp\build-osqp\solve_wbc_once.exe .\models\mujoco_menagerie\unitree_go2\scene.xml
+.\cpp\build-osqp\solve_mpc_once.exe .\models\mujoco_menagerie\unitree_go2\scene.xml
+.\cpp\build-osqp\run_trot_rollout.exe .\models\mujoco_menagerie\unitree_go2\scene.xml 0.012 0.08
+```
+
+Example local headless results:
+
+```text
+straight / turning trot: sim_per_wall ~= 1.8-2.2
+average WBC solve ~= 0.36-0.40 ms
+average MPC solve ~= 31-37 ms
+average MuJoCo step ~= 0.04 ms
+```
+
+This C++ path is still a research implementation. It solves the MPC and WBC
+QPs online during the rollout and does not use a pre-recorded torque sequence.
+
 ## Project Layout
 
 ```text
@@ -175,6 +214,11 @@ mujoco_wbc_project/
 |   |-- inspect_frame_conventions.py
 |   |-- launch_go2_viewer.py
 |   `-- check_mujoco_install.py
+|-- cpp/
+|   |-- CMakeLists.txt
+|   |-- include/go2wbc/         # C++ control interfaces
+|   |-- src/                    # MuJoCo interface, OSQP wrapper, MPC, WBC
+|   `-- apps/                   # dynamics, QP, and headless rollout executables
 `-- docs/
     |-- control_stack.md
     |-- mainline_architecture.md
@@ -286,12 +330,13 @@ generic non-flight contact-mode WBC
 stance, single-leg swing, crawl-mode, and diagonal-trot checks
 stable offline route replay demo
 WBC profiling and cached actuation matrix validation
+C++ headless MPC/WBC rollout for straight and turning trot
 ```
 
 Out of scope for the current Python prototype:
 
 ```text
-real-time C++ implementation
+hardware real-time deployment
 hardware state estimation
 hardware deployment
 robust touchdown and load-transfer handling
@@ -305,7 +350,7 @@ large-scale RL training
 Possible extensions include:
 
 ```text
-1. C++/ROS 2 implementation with fixed-size data structures and reusable QP memory.
+1. ROS 2 integration with fixed-size data structures and reusable QP memory.
 2. Fixed-sparsity WBC formulation with a constant 42-dimensional decision vector.
 3. Improved foothold and body-reference generation.
 4. Contact transition handling with force ramps and touchdown hysteresis.
