@@ -70,7 +70,20 @@ From the repository root:
 The rollout arguments are:
 
 ```text
-run_trot_rollout.exe <model.xml> <vx_mps> <yaw_rate_radps>
+run_trot_rollout.exe <model.xml> <vx_mps> <yaw_rate_radps> [record_csv]
+```
+
+To save a C++ rollout and render it as a GIF:
+
+```powershell
+.\cpp\build-osqp\run_trot_rollout.exe .\models\mujoco_menagerie\unitree_go2\scene.xml 0.012 0.08 cpp_outputs/cpp_trot_turn.csv
+.\.venv\Scripts\python.exe -B .\scripts\render_cpp_rollout_gif.py --csv .\cpp_outputs\cpp_trot_turn.csv --gif-output .\cpp_outputs\cpp_trot_turn.gif
+```
+
+To view the same C++ trajectory in the MuJoCo viewer:
+
+```powershell
+.\.venv\Scripts\python.exe -B .\scripts\render_cpp_rollout_gif.py --csv .\cpp_outputs\cpp_trot_turn.csv --no-gif --viewer-replay
 ```
 
 ## Local Benchmark Example

@@ -3,6 +3,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -278,9 +281,32 @@ bool isSolved(const std::string& status) {
     return status == "solved" || status == "solved inaccurate";
 }
 
+void writeCsvHeader(std::ofstream& stream, int nq, int nv) {
+    stream << "time";
+    for (int i = 0; i < nq; ++i) {
+        stream << ",qpos" << i;
+    }
+    for (int i = 0; i < nv; ++i) {
+        stream << ",qvel" << i;
+    }
+    stream << "\n";
+}
+
+void writeCsvSample(std::ofstream& stream, const MujocoModelInterface& robot) {
+    stream << std::fixed << std::setprecision(10) << robot.data()->time;
+    for (int i = 0; i < robot.nq(); ++i) {
+        stream << "," << robot.data()->qpos[i];
+    }
+    for (int i = 0; i < robot.nv(); ++i) {
+        stream << "," << robot.data()->qvel[i];
+    }
+    stream << "\n";
+}
+
 int main(int argc, char** argv) {
     try {
         std::string model_path = ".\\models\\mujoco_menagerie\\unitree_go2\\scene.xml";
+        std::string record_csv_path;
         double vx = 0.012;
         double vy = 0.0;
         double yaw_rate = 0.0;
@@ -297,6 +323,9 @@ int main(int argc, char** argv) {
         }
         if (argc >= 4) {
             yaw_rate = std::atof(argv[3]);
+        }
+        if (argc >= 5) {
+            record_csv_path = argv[4];
         }
 
         MujocoModelInterface robot(model_path);
@@ -355,6 +384,8 @@ int main(int argc, char** argv) {
         double next_mpc = 0.0;
         double next_wbc = 0.0;
         double next_log = 0.0;
+        double next_record = 0.0;
+        double record_dt = 1.0 / 60.0;
         int next_window = 0;
         int active_window = -1;
         std::array<SwingPlan, 2> active_plans;
@@ -364,11 +395,27 @@ int main(int argc, char** argv) {
         std::string wbc_status = "not_run";
         TimerStats stats;
         double wall_start = nowMs();
+        std::ofstream record_csv;
+        if (!record_csv_path.empty()) {
+            std::filesystem::path path(record_csv_path);
+            if (!path.parent_path().empty()) {
+                std::filesystem::create_directories(path.parent_path());
+            }
+            record_csv.open(record_csv_path.c_str(), std::ios::out | std::ios::trunc);
+            if (!record_csv.is_open()) {
+                throw std::runtime_error("Could not open CSV output: " + record_csv_path);
+            }
+            writeCsvHeader(record_csv, robot.nq(), robot.nv());
+            writeCsvSample(record_csv, robot);
+        }
 
         std::cout << "C++ trot rollout vx=" << vx
                   << " yaw_rate=" << yaw_rate
                   << " cycles=" << cycles
                   << " nominal_step=" << nominal_step.transpose() << "\n";
+        if (!record_csv_path.empty()) {
+            std::cout << "record_csv=" << record_csv_path << "\n";
+        }
 
         while (robot.data()->time < sim_duration) {
             double sim_time = robot.data()->time;
@@ -489,6 +536,11 @@ int main(int argc, char** argv) {
             stats.step_ms += nowMs() - step_t0;
             stats.step_count++;
 
+            if (record_csv.is_open() && robot.data()->time >= next_record) {
+                writeCsvSample(record_csv, robot);
+                next_record += record_dt;
+            }
+
             if (robot.data()->time >= next_log) {
                 Vector3 rpy = go2wbc::quatToRpy(robot.data()->qpos + 3);
                 std::cout << "t=" << robot.data()->time
@@ -519,6 +571,10 @@ int main(int argc, char** argv) {
         std::cout << "avg_ms mpc=" << (stats.mpc_count > 0 ? stats.mpc_ms / stats.mpc_count : 0.0)
                   << " wbc=" << (stats.wbc_count > 0 ? stats.wbc_ms / stats.wbc_count : 0.0)
                   << " mj_step=" << (stats.step_count > 0 ? stats.step_ms / stats.step_count : 0.0) << "\n";
+        if (record_csv.is_open()) {
+            record_csv.close();
+            std::cout << "saved_csv=" << record_csv_path << "\n";
+        }
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;

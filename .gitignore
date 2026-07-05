@@ -26,6 +26,7 @@ Thumbs.db
 # Logs and generated outputs
 *.log
 outputs/
+cpp_outputs/
 runs/
 videos/
 frames/

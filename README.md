@@ -168,6 +168,13 @@ $env:Path = "D:\projects\quadruped_project\tools\w64devkit\bin;" + $env:Path
 .\cpp\build-osqp\run_trot_rollout.exe .\models\mujoco_menagerie\unitree_go2\scene.xml 0.012 0.08
 ```
 
+Save and render a C++ rollout:
+
+```powershell
+.\cpp\build-osqp\run_trot_rollout.exe .\models\mujoco_menagerie\unitree_go2\scene.xml 0.012 0.08 cpp_outputs/cpp_trot_turn.csv
+.\.venv\Scripts\python.exe -B .\scripts\render_cpp_rollout_gif.py --csv .\cpp_outputs\cpp_trot_turn.csv --gif-output .\cpp_outputs\cpp_trot_turn.gif
+```
+
 Example local headless results:
 
 ```text
