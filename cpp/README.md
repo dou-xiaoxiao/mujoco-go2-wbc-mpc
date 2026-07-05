@@ -1,9 +1,9 @@
 # C++ MPC/WBC Implementation
 
 This directory contains a plain C++ implementation of the MuJoCo Go2
-locomotion control stack. The Python stack remains a readable reference, while
-the C++ stack is used to test the same control ideas with lower runtime
-overhead.
+locomotion control stack. The Python stack remains the recommended visual demo,
+while the C++ stack is used to test the same control ideas with lower runtime
+overhead and a clearer path toward real-time deployment.
 
 The implementation is intentionally direct: classes, Eigen matrices, MuJoCo C
 API calls, and OSQP C API calls. It avoids ROS 2 and template-heavy framework
@@ -75,10 +75,12 @@ run_trot_rollout.exe <model.xml> <vx_mps> <yaw_rate_radps> [record_csv]
 run_trot_rollout.exe <model.xml> route [record_csv]
 ```
 
-The `route` mode is a simple demonstration sequence: straight walking, left
-turning, more straight walking, and a final stop.
+The `route` mode is a simple sequence: straight walking, left turning, more
+straight walking, and a final stop. It is intended for performance and
+architecture checks. The Python route demo currently has more mature
+reference/planner tuning and should be used for public visual presentation.
 
-To save a C++ route rollout and render it as a GIF:
+To save a C++ route rollout and render it as a debugging GIF:
 
 ```powershell
 .\cpp\build-osqp\run_trot_rollout.exe .\models\mujoco_menagerie\unitree_go2\scene.xml route cpp_outputs/cpp_trot_route.csv

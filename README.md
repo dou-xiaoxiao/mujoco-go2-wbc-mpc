@@ -35,7 +35,7 @@ MuJoCo floating-base state
 - Basic profiling hooks for the WBC solve path and cached actuation matrix
   support for the Go2 MuJoCo model.
 - A plain C++ MPC/WBC implementation using Eigen, the MuJoCo C API, and the
-  OSQP C API for headless speed checks.
+  OSQP C API for headless speed checks and future real-time development.
 
 ## Demo
 
@@ -169,10 +169,11 @@ $env:Path = "D:\projects\quadruped_project\tools\w64devkit\bin;" + $env:Path
 .\cpp\build-osqp\run_trot_rollout.exe .\models\mujoco_menagerie\unitree_go2\scene.xml route cpp_outputs/cpp_trot_route.csv
 ```
 
-The C++ `route` mode performs a simple straight-walk, left-turn, straight-walk,
-and stop sequence.
+The C++ route rollout is currently a performance and architecture check, not
+the recommended public visual demo. The Python route demo has the more mature
+reference/planner tuning and should be used for presentation videos.
 
-Save and render a C++ route rollout:
+Save and render a C++ route rollout for debugging:
 
 ```powershell
 .\cpp\build-osqp\run_trot_rollout.exe .\models\mujoco_menagerie\unitree_go2\scene.xml route cpp_outputs/cpp_trot_route.csv
