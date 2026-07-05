@@ -51,6 +51,13 @@ struct SwingReference {
     Vector3 acceleration;
 };
 
+struct CommandSegment {
+    double duration;
+    double vx;
+    double vy;
+    double yaw_rate;
+};
+
 struct TimerStats {
     double mpc_ms;
     double wbc_ms;
@@ -63,6 +70,48 @@ struct TimerStats {
 };
 
 const double kPi = 3.14159265358979323846;
+
+CommandSegment commandAt(const std::vector<CommandSegment>& segments, double command_time, double* elapsed_before) {
+    double elapsed = 0.0;
+    for (size_t i = 0; i < segments.size(); ++i) {
+        if (command_time < elapsed + segments[i].duration) {
+            *elapsed_before = elapsed;
+            return segments[i];
+        }
+        elapsed += segments[i].duration;
+    }
+    *elapsed_before = elapsed;
+    CommandSegment stop;
+    stop.duration = 1.0;
+    stop.vx = 0.0;
+    stop.vy = 0.0;
+    stop.yaw_rate = 0.0;
+    return stop;
+}
+
+Vector3 integratedCommandPose(const std::vector<CommandSegment>& segments, double command_time) {
+    Vector3 pose = Vector3::Zero();  // x, y, yaw
+    double elapsed = 0.0;
+    for (size_t i = 0; i < segments.size(); ++i) {
+        double dt = std::min(segments[i].duration, std::max(0.0, command_time - elapsed));
+        if (dt <= 0.0) {
+            break;
+        }
+        pose(0) += segments[i].vx * dt;
+        pose(1) += segments[i].vy * dt;
+        pose(2) += segments[i].yaw_rate * dt;
+        elapsed += segments[i].duration;
+    }
+    return pose;
+}
+
+double totalCommandDuration(const std::vector<CommandSegment>& segments) {
+    double total = 0.0;
+    for (size_t i = 0; i < segments.size(); ++i) {
+        total += segments[i].duration;
+    }
+    return total;
+}
 
 double nowMs() {
     using Clock = std::chrono::steady_clock;
@@ -315,17 +364,44 @@ int main(int argc, char** argv) {
         double stance_gap = 0.45;
         double swing_height = 0.035;
         double max_step_length = 0.035;
+        std::vector<CommandSegment> command_segments;
         if (argc >= 2) {
             model_path = argv[1];
         }
-        if (argc >= 3) {
+        bool route_mode = argc >= 3 && std::string(argv[2]) == "route";
+        if (route_mode) {
+            CommandSegment forward1 = {12.0, 0.040, 0.0, 0.0};
+            CommandSegment turn = {20.0, 0.004, 0.0, kPi / 40.0};
+            CommandSegment forward2 = {12.0, 0.040, 0.0, 0.0};
+            CommandSegment stop = {2.0, 0.0, 0.0, 0.0};
+            command_segments.push_back(forward1);
+            command_segments.push_back(turn);
+            command_segments.push_back(forward2);
+            command_segments.push_back(stop);
+            vx = 0.040;
+            yaw_rate = 0.0;
+            if (argc >= 4) {
+                record_csv_path = argv[3];
+            }
+        } else if (argc >= 3) {
             vx = std::atof(argv[2]);
+            if (argc >= 4) {
+                yaw_rate = std::atof(argv[3]);
+            }
+            if (argc >= 5) {
+                record_csv_path = argv[4];
+            }
+            if (argc >= 6) {
+                cycles = std::max(1, std::atoi(argv[5]));
+            }
         }
-        if (argc >= 4) {
-            yaw_rate = std::atof(argv[3]);
+        if (command_segments.empty()) {
+            CommandSegment constant = {2.0 * cycles * (swing_duration + stance_gap), vx, vy, yaw_rate};
+            command_segments.push_back(constant);
         }
-        if (argc >= 5) {
-            record_csv_path = argv[4];
+        double command_duration = totalCommandDuration(command_segments);
+        if (route_mode) {
+            cycles = std::max(1, static_cast<int>(std::ceil(command_duration / (2.0 * (swing_duration + stance_gap)))));
         }
 
         MujocoModelInterface robot(model_path);
@@ -343,7 +419,6 @@ int main(int argc, char** argv) {
 
         std::vector<TrotWindow> windows = buildWindows(cycles, swing_duration, stance_gap);
         double period = 2.0 * (swing_duration + stance_gap);
-        Vector3 nominal_step = limitedPlanarDelta(Vector3(vx * period, vy * period, 0.0), max_step_length);
         double command_start = windows.empty() ? 0.0 : windows[0].start;
 
         CentroidalMpcConfig mpc_cfg;
@@ -409,10 +484,11 @@ int main(int argc, char** argv) {
             writeCsvSample(record_csv, robot);
         }
 
-        std::cout << "C++ trot rollout vx=" << vx
+        std::cout << "C++ trot rollout mode=" << (route_mode ? "route" : "constant")
+                  << " vx=" << vx
                   << " yaw_rate=" << yaw_rate
                   << " cycles=" << cycles
-                  << " nominal_step=" << nominal_step.transpose() << "\n";
+                  << " command_duration=" << command_duration << "\n";
         if (!record_csv_path.empty()) {
             std::cout << "record_csv=" << record_csv_path << "\n";
         }
@@ -423,13 +499,17 @@ int main(int argc, char** argv) {
             if (active_window < 0 && next_window < static_cast<int>(windows.size()) && sim_time >= windows[static_cast<size_t>(next_window)].start) {
                 active_window = next_window;
                 const TrotWindow& window = windows[static_cast<size_t>(active_window)];
+                double elapsed_before = 0.0;
+                CommandSegment swing_command = commandAt(command_segments, std::max(0.0, window.start - command_start), &elapsed_before);
+                Vector3 nominal_step = limitedPlanarDelta(Vector3(swing_command.vx * period, swing_command.vy * period, 0.0), max_step_length);
+                double nominal_yaw_delta = swing_command.yaw_rate * period;
                 for (int i = 0; i < 2; ++i) {
                     Foot foot = window.swing_feet[static_cast<size_t>(i)];
                     active_plans[static_cast<size_t>(i)].foot = foot;
                     active_plans[static_cast<size_t>(i)].start_position = locked_feet[static_cast<size_t>(foot)];
                     active_plans[static_cast<size_t>(i)].target_position =
                         locked_feet[static_cast<size_t>(foot)]
-                        + footholdDeltaForFoot(foot, initial_feet, nominal_step, yaw_rate * period, max_step_length);
+                        + footholdDeltaForFoot(foot, initial_feet, nominal_step, nominal_yaw_delta, max_step_length);
                 }
                 next_mpc = sim_time;
                 next_wbc = sim_time;
@@ -467,15 +547,18 @@ int main(int argc, char** argv) {
             }
 
             double command_time = std::max(0.0, sim_time - command_start);
-            double yaw_ref = yaw_rate * command_time;
+            double elapsed_before = 0.0;
+            CommandSegment current_command = commandAt(command_segments, command_time, &elapsed_before);
+            Vector3 integrated_pose = integratedCommandPose(command_segments, command_time);
+            double yaw_ref = integrated_pose(2);
             VectorX qpos_ref = footCenteredBaseReference(home_qpos, initial_base, initial_feet, planned_feet, yaw_ref);
-            qpos_ref(1) = initial_base(1) + vy * command_time;
+            qpos_ref(1) = initial_base(1) + integrated_pose(1);
             Vector3 com_ref = home_com;
             com_ref(0) += qpos_ref(0) - initial_base(0);
             com_ref(1) += qpos_ref(1) - initial_base(1);
-            Vector3 com_vel_ref(vx, vy, 0.0);
+            Vector3 com_vel_ref(current_command.vx, current_command.vy, 0.0);
             Vector3 ori_ref(0.0, 0.0, yaw_ref);
-            Vector3 omega_ref(0.0, 0.0, yaw_rate);
+            Vector3 omega_ref(0.0, 0.0, current_command.yaw_rate);
 
             if (sim_time >= next_mpc) {
                 double t0 = nowMs();

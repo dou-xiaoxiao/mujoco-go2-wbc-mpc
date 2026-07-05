@@ -166,13 +166,17 @@ $env:Path = "D:\projects\quadruped_project\tools\w64devkit\bin;" + $env:Path
 .\cpp\build-osqp\solve_wbc_once.exe .\models\mujoco_menagerie\unitree_go2\scene.xml
 .\cpp\build-osqp\solve_mpc_once.exe .\models\mujoco_menagerie\unitree_go2\scene.xml
 .\cpp\build-osqp\run_trot_rollout.exe .\models\mujoco_menagerie\unitree_go2\scene.xml 0.012 0.08
+.\cpp\build-osqp\run_trot_rollout.exe .\models\mujoco_menagerie\unitree_go2\scene.xml route cpp_outputs/cpp_trot_route.csv
 ```
 
-Save and render a C++ rollout:
+The C++ `route` mode performs a simple straight-walk, left-turn, straight-walk,
+and stop sequence.
+
+Save and render a C++ route rollout:
 
 ```powershell
-.\cpp\build-osqp\run_trot_rollout.exe .\models\mujoco_menagerie\unitree_go2\scene.xml 0.012 0.08 cpp_outputs/cpp_trot_turn.csv
-.\.venv\Scripts\python.exe -B .\scripts\render_cpp_rollout_gif.py --csv .\cpp_outputs\cpp_trot_turn.csv --gif-output .\cpp_outputs\cpp_trot_turn.gif
+.\cpp\build-osqp\run_trot_rollout.exe .\models\mujoco_menagerie\unitree_go2\scene.xml route cpp_outputs/cpp_trot_route.csv
+.\.venv\Scripts\python.exe -B .\scripts\render_cpp_rollout_gif.py --csv .\cpp_outputs\cpp_trot_route.csv --gif-output .\cpp_outputs\cpp_trot_route.gif --stride 4 --fps 30 --playback-speed 2.0
 ```
 
 Example local headless results:

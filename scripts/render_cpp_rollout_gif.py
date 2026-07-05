@@ -26,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-gif", action="store_true")
     parser.add_argument("--fps", type=float, default=60.0)
     parser.add_argument("--playback-speed", type=float, default=1.0)
+    parser.add_argument("--stride", type=int, default=1, help="Render every Nth CSV sample.")
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=360)
     return parser
@@ -37,10 +38,16 @@ def main() -> None:
         raise ValueError("--fps must be positive")
     if args.playback_speed <= 0.0:
         raise ValueError("--playback-speed must be positive")
+    if args.stride <= 0:
+        raise ValueError("--stride must be positive")
 
     csv_path = absolute_path(args.csv)
     gif_path = absolute_path(args.gif_output)
     times, qpos, qvel = load_cpp_csv(csv_path)
+    if args.stride > 1:
+        times = times[:: args.stride]
+        qpos = qpos[:: args.stride]
+        qvel = qvel[:: args.stride]
     print(f"loaded C++ rollout: {csv_path} ({qpos.shape[0]} frames)")
 
     if not args.no_gif:
