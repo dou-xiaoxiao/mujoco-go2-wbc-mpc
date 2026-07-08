@@ -35,6 +35,8 @@ struct TrotWindow {
     std::array<Foot, 2> swing_feet;
     double start;
     double duration;
+    Vector3 step_delta;
+    double yaw_delta;
 
     double end() const { return start + duration; }
 };
@@ -91,16 +93,18 @@ CommandSegment commandAt(const std::vector<CommandSegment>& segments, double com
 
 Vector3 integratedCommandPose(const std::vector<CommandSegment>& segments, double command_time) {
     Vector3 pose = Vector3::Zero();  // x, y, yaw
-    double elapsed = 0.0;
+    double remaining = std::max(0.0, command_time);
     for (size_t i = 0; i < segments.size(); ++i) {
-        double dt = std::min(segments[i].duration, std::max(0.0, command_time - elapsed));
+        double dt = std::min(segments[i].duration, remaining);
         if (dt <= 0.0) {
             break;
         }
-        pose(0) += segments[i].vx * dt;
-        pose(1) += segments[i].vy * dt;
+        double c = std::cos(pose(2));
+        double s = std::sin(pose(2));
+        pose(0) += (c * segments[i].vx - s * segments[i].vy) * dt;
+        pose(1) += (s * segments[i].vx + c * segments[i].vy) * dt;
         pose(2) += segments[i].yaw_rate * dt;
-        elapsed += segments[i].duration;
+        remaining -= dt;
     }
     return pose;
 }
@@ -137,18 +141,58 @@ Vector3 limitedPlanarDelta(const Vector3& delta, double max_step_length) {
     return out;
 }
 
-std::vector<TrotWindow> buildWindows(int cycles, double swing_duration, double stance_gap) {
+bool isZeroCommand(const CommandSegment& command) {
+    return std::abs(command.vx) < 1.0e-12
+        && std::abs(command.vy) < 1.0e-12
+        && std::abs(command.yaw_rate) < 1.0e-12;
+}
+
+Vector3 rotateYawPlanar(double yaw, const Vector3& vector) {
+    double c = std::cos(yaw);
+    double s = std::sin(yaw);
+    Vector3 out = Vector3::Zero();
+    out(0) = c * vector(0) - s * vector(1);
+    out(1) = s * vector(0) + c * vector(1);
+    out(2) = vector(2);
+    return out;
+}
+
+std::vector<TrotWindow> buildWindows(
+    const std::vector<CommandSegment>& segments,
+    double settle_time,
+    double swing_duration,
+    double stance_gap,
+    double max_step_length
+) {
     std::vector<TrotWindow> windows;
-    double start = 1.0;
     double stride = swing_duration + stance_gap;
-    for (int i = 0; i < 2 * cycles; ++i) {
+    double foot_period = 2.0 * stride;
+    double total_command_time = totalCommandDuration(segments);
+    double start = settle_time;
+    int idx = 0;
+    while (start < settle_time + total_command_time) {
+        double command_time = start - settle_time;
+        double elapsed_before = 0.0;
+        CommandSegment command = commandAt(segments, command_time, &elapsed_before);
+        if (isZeroCommand(command)) {
+            start += stride;
+            idx++;
+            continue;
+        }
+        Vector3 pose = integratedCommandPose(segments, command_time);
+        Vector3 body_step(command.vx * foot_period, command.vy * foot_period, 0.0);
+        Vector3 step_delta = limitedPlanarDelta(rotateYawPlanar(pose(2), body_step), max_step_length);
         TrotWindow window;
-        window.swing_feet = (i % 2 == 0)
+        window.swing_feet = (idx % 2 == 0)
             ? std::array<Foot, 2>{{FOOT_FL, FOOT_RR}}
             : std::array<Foot, 2>{{FOOT_FR, FOOT_RL}};
-        window.start = start + static_cast<double>(i) * stride;
+        window.start = start;
         window.duration = swing_duration;
+        window.step_delta = step_delta;
+        window.yaw_delta = command.yaw_rate * foot_period;
         windows.push_back(window);
+        start += stride;
+        idx++;
     }
     return windows;
 }
@@ -159,7 +203,7 @@ bool containsFoot(const std::array<Foot, 2>& feet, Foot foot) {
 
 Vector3 footholdDeltaForFoot(
     Foot foot,
-    const std::array<Vector3, go2wbc::kNumFeet>& initial_feet,
+    const std::array<Vector3, go2wbc::kNumFeet>& layout_feet,
     const Vector3& step_delta,
     double yaw_delta,
     double max_step_length
@@ -168,14 +212,70 @@ Vector3 footholdDeltaForFoot(
     if (yaw_delta != 0.0) {
         Vector3 center = Vector3::Zero();
         for (Foot f : go2wbc::allFeet()) {
-            center += initial_feet[static_cast<size_t>(f)];
+            center += layout_feet[static_cast<size_t>(f)];
         }
         center /= static_cast<double>(go2wbc::kNumFeet);
-        Vector3 offset = initial_feet[static_cast<size_t>(foot)] - center;
+        Vector3 offset = layout_feet[static_cast<size_t>(foot)] - center;
         delta(0) += yaw_delta * (-offset(1));
         delta(1) += yaw_delta * offset(0);
     }
     return limitedPlanarDelta(delta, max_step_length);
+}
+
+Vector3 clampPlanarStep(const Vector3& start, const Vector3& target, double max_step_length) {
+    Vector3 delta = target - start;
+    double norm_xy = std::sqrt(delta(0) * delta(0) + delta(1) * delta(1));
+    if (norm_xy <= max_step_length || norm_xy <= 0.0) {
+        return target;
+    }
+    Vector3 out = start;
+    out(0) += delta(0) * max_step_length / norm_xy;
+    out(1) += delta(1) * max_step_length / norm_xy;
+    out(2) = target(2);
+    return out;
+}
+
+Vector3 lateralWidthRegulatedFoothold(
+    Foot foot,
+    const std::array<Vector3, go2wbc::kNumFeet>& locked_feet,
+    const Vector3& base_position,
+    double base_yaw,
+    const Vector3& initial_base,
+    const std::array<Vector3, go2wbc::kNumFeet>& initial_feet,
+    const Vector3& step_delta,
+    double yaw_delta,
+    double max_step_length,
+    double correction,
+    double margin
+) {
+    Vector3 start = locked_feet[static_cast<size_t>(foot)];
+    Vector3 target = start + footholdDeltaForFoot(foot, locked_feet, step_delta, yaw_delta, max_step_length);
+    if (correction <= 0.0) {
+        return target;
+    }
+
+    double c = std::cos(base_yaw);
+    double s = std::sin(base_yaw);
+    Vector3 nominal_offset_base = initial_feet[static_cast<size_t>(foot)] - initial_base;
+    Vector3 rel = target - base_position;
+    Vector3 target_offset_base = Vector3::Zero();
+    target_offset_base(0) = c * rel(0) + s * rel(1);
+    target_offset_base(1) = -s * rel(0) + c * rel(1);
+    target_offset_base(2) = rel(2);
+
+    double lateral_error = target_offset_base(1) - nominal_offset_base(1);
+    if (std::abs(lateral_error) <= margin) {
+        return target;
+    }
+
+    Vector3 corrected_offset_base = target_offset_base;
+    double signed_margin = lateral_error > 0.0 ? margin : -margin;
+    corrected_offset_base(1) -= correction * (lateral_error - signed_margin);
+
+    Vector3 corrected = target;
+    corrected(0) = base_position(0) + c * corrected_offset_base(0) - s * corrected_offset_base(1);
+    corrected(1) = base_position(1) + s * corrected_offset_base(0) + c * corrected_offset_base(1);
+    return clampPlanarStep(start, corrected, max_step_length);
 }
 
 void smoothstep(double r, double* s, double* ds, double* dds) {
@@ -360,24 +460,29 @@ int main(int argc, char** argv) {
         double vy = 0.0;
         double yaw_rate = 0.0;
         int cycles = 3;
-        double swing_duration = 0.35;
+        double settle_time = 0.8;
+        double swing_duration = 0.20;
         double stance_gap = 0.45;
         double swing_height = 0.035;
-        double max_step_length = 0.035;
+        double max_step_length = 0.045;
+        double lateral_foot_width_correction = 0.35;
+        double lateral_foot_width_margin = 0.025;
         std::vector<CommandSegment> command_segments;
         if (argc >= 2) {
             model_path = argv[1];
         }
         bool route_mode = argc >= 3 && std::string(argv[2]) == "route";
         if (route_mode) {
-            CommandSegment forward1 = {12.0, 0.040, 0.0, 0.0};
+            CommandSegment forward1 = {37.5, 0.040, 0.0, 0.0};
             CommandSegment turn = {20.0, 0.004, 0.0, kPi / 40.0};
-            CommandSegment forward2 = {12.0, 0.040, 0.0, 0.0};
-            CommandSegment stop = {2.0, 0.0, 0.0, 0.0};
+            CommandSegment stop1 = {3.0, 0.0, 0.0, 0.0};
+            CommandSegment forward2 = {4.0, 0.025, 0.0, 0.0};
+            CommandSegment stop2 = {3.0, 0.0, 0.0, 0.0};
             command_segments.push_back(forward1);
             command_segments.push_back(turn);
+            command_segments.push_back(stop1);
             command_segments.push_back(forward2);
-            command_segments.push_back(stop);
+            command_segments.push_back(stop2);
             vx = 0.040;
             yaw_rate = 0.0;
             if (argc >= 4) {
@@ -400,9 +505,6 @@ int main(int argc, char** argv) {
             command_segments.push_back(constant);
         }
         double command_duration = totalCommandDuration(command_segments);
-        if (route_mode) {
-            cycles = std::max(1, static_cast<int>(std::ceil(command_duration / (2.0 * (swing_duration + stance_gap)))));
-        }
 
         MujocoModelInterface robot(model_path);
         robot.setKeyframe("home");
@@ -417,11 +519,20 @@ int main(int argc, char** argv) {
             locked_feet[static_cast<size_t>(foot)] = initial_feet[static_cast<size_t>(foot)];
         }
 
-        std::vector<TrotWindow> windows = buildWindows(cycles, swing_duration, stance_gap);
-        double period = 2.0 * (swing_duration + stance_gap);
-        double command_start = windows.empty() ? 0.0 : windows[0].start;
+        std::vector<TrotWindow> windows = buildWindows(command_segments, settle_time, swing_duration, stance_gap, max_step_length);
+        if (windows.empty()) {
+            throw std::runtime_error("No swing windows generated for rollout");
+        }
+        double command_start = settle_time;
 
         CentroidalMpcConfig mpc_cfg;
+        mpc_cfg.horizon_steps = 12;
+        mpc_cfg.dt = 0.03;
+        mpc_cfg.normal_force_min = 5.0;
+        mpc_cfg.weight_com_position = 650.0;
+        mpc_cfg.weight_com_velocity = 15.0;
+        mpc_cfg.weight_orientation = 1400.0;
+        mpc_cfg.weight_angular_velocity = 120.0;
         CentroidalMpc mpc(mpc_cfg);
 
         GeneralContactWbcConfig stance_cfg;
@@ -453,7 +564,7 @@ int main(int argc, char** argv) {
         frrl_cfg.swing_feet = {FOOT_FR, FOOT_RL};
         GeneralContactWbc frrl_wbc(frrl_cfg);
 
-        double sim_duration = windows.back().end() + 1.0;
+        double sim_duration = settle_time + command_duration;
         double mpc_dt = 0.08;
         double wbc_dt = 0.02;
         double next_mpc = 0.0;
@@ -487,8 +598,11 @@ int main(int argc, char** argv) {
         std::cout << "C++ trot rollout mode=" << (route_mode ? "route" : "constant")
                   << " vx=" << vx
                   << " yaw_rate=" << yaw_rate
-                  << " cycles=" << cycles
-                  << " command_duration=" << command_duration << "\n";
+                  << " windows=" << windows.size()
+                  << " command_duration=" << command_duration
+                  << " swing=" << swing_duration
+                  << " gap=" << stance_gap
+                  << " step_max=" << max_step_length << "\n";
         if (!record_csv_path.empty()) {
             std::cout << "record_csv=" << record_csv_path << "\n";
         }
@@ -499,17 +613,25 @@ int main(int argc, char** argv) {
             if (active_window < 0 && next_window < static_cast<int>(windows.size()) && sim_time >= windows[static_cast<size_t>(next_window)].start) {
                 active_window = next_window;
                 const TrotWindow& window = windows[static_cast<size_t>(active_window)];
-                double elapsed_before = 0.0;
-                CommandSegment swing_command = commandAt(command_segments, std::max(0.0, window.start - command_start), &elapsed_before);
-                Vector3 nominal_step = limitedPlanarDelta(Vector3(swing_command.vx * period, swing_command.vy * period, 0.0), max_step_length);
-                double nominal_yaw_delta = swing_command.yaw_rate * period;
+                Vector3 base_position(robot.data()->qpos[0], robot.data()->qpos[1], robot.data()->qpos[2]);
+                double base_yaw = go2wbc::quatToRpy(robot.data()->qpos + 3)(2);
                 for (int i = 0; i < 2; ++i) {
                     Foot foot = window.swing_feet[static_cast<size_t>(i)];
                     active_plans[static_cast<size_t>(i)].foot = foot;
                     active_plans[static_cast<size_t>(i)].start_position = locked_feet[static_cast<size_t>(foot)];
-                    active_plans[static_cast<size_t>(i)].target_position =
-                        locked_feet[static_cast<size_t>(foot)]
-                        + footholdDeltaForFoot(foot, initial_feet, nominal_step, nominal_yaw_delta, max_step_length);
+                    active_plans[static_cast<size_t>(i)].target_position = lateralWidthRegulatedFoothold(
+                        foot,
+                        locked_feet,
+                        base_position,
+                        base_yaw,
+                        initial_base,
+                        initial_feet,
+                        window.step_delta,
+                        window.yaw_delta,
+                        max_step_length,
+                        lateral_foot_width_correction,
+                        lateral_foot_width_margin
+                    );
                 }
                 next_mpc = sim_time;
                 next_wbc = sim_time;
@@ -552,11 +674,12 @@ int main(int argc, char** argv) {
             Vector3 integrated_pose = integratedCommandPose(command_segments, command_time);
             double yaw_ref = integrated_pose(2);
             VectorX qpos_ref = footCenteredBaseReference(home_qpos, initial_base, initial_feet, planned_feet, yaw_ref);
+            qpos_ref(0) = 0.85 * qpos_ref(0) + 0.15 * (initial_base(0) + integrated_pose(0));
             qpos_ref(1) = initial_base(1) + integrated_pose(1);
             Vector3 com_ref = home_com;
             com_ref(0) += qpos_ref(0) - initial_base(0);
             com_ref(1) += qpos_ref(1) - initial_base(1);
-            Vector3 com_vel_ref(current_command.vx, current_command.vy, 0.0);
+            Vector3 com_vel_ref = rotateYawPlanar(yaw_ref, Vector3(current_command.vx, current_command.vy, 0.0));
             Vector3 ori_ref(0.0, 0.0, yaw_ref);
             Vector3 omega_ref(0.0, 0.0, current_command.yaw_rate);
 
