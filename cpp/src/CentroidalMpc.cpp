@@ -1,8 +1,10 @@
 #include "go2wbc/CentroidalMpc.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <vector>
 
 namespace go2wbc {
 
@@ -18,6 +20,51 @@ int stateIndex(int step, int offset) {
 
 int forceIndex(int force_offset, int step, int offset) {
     return force_offset + step * kForceDimAll + offset;
+}
+
+struct SparseEntry {
+    int row;
+    int col;
+    double value;
+};
+
+void addEntry(std::vector<SparseEntry>* entries, int row, int col, double value) {
+    SparseEntry entry;
+    entry.row = row;
+    entry.col = col;
+    entry.value = value;
+    entries->push_back(entry);
+}
+
+SparseCSC entriesToCSC(int rows, int cols, std::vector<SparseEntry> entries) {
+    std::sort(entries.begin(), entries.end(), [](const SparseEntry& a, const SparseEntry& b) {
+        if (a.col != b.col) {
+            return a.col < b.col;
+        }
+        return a.row < b.row;
+    });
+
+    SparseCSC out;
+    out.rows = rows;
+    out.cols = cols;
+    out.col_ptr.assign(static_cast<size_t>(cols + 1), 0);
+
+    size_t cursor = 0;
+    for (int col = 0; col < cols; ++col) {
+        out.col_ptr[static_cast<size_t>(col)] = static_cast<OSQPInt>(out.values.size());
+        while (cursor < entries.size() && entries[cursor].col == col) {
+            int row = entries[cursor].row;
+            double value = 0.0;
+            while (cursor < entries.size() && entries[cursor].col == col && entries[cursor].row == row) {
+                value += entries[cursor].value;
+                cursor++;
+            }
+            out.row_idx.push_back(static_cast<OSQPInt>(row));
+            out.values.push_back(static_cast<OSQPFloat>(value));
+        }
+    }
+    out.col_ptr[static_cast<size_t>(cols)] = static_cast<OSQPInt>(out.values.size());
+    return out;
 }
 
 }  // namespace
@@ -36,9 +83,9 @@ CentroidalMpcConfig::CentroidalMpcConfig()
 
 CentroidalMpc::CentroidalMpc(const CentroidalMpcConfig& config)
     : config_(config) {
-    solver_.setTolerances(1.0e-7, 1.0e-7);
-    solver_.setMaxIterations(10000);
-    solver_.setPolishing(true);
+    solver_.setTolerances(1.0e-6, 1.0e-6);
+    solver_.setMaxIterations(4000);
+    solver_.setPolishing(false);
 }
 
 CentroidalMpcOutput CentroidalMpc::solve(MujocoModelInterface& robot, const CentroidalMpcInput& input) {
@@ -110,19 +157,24 @@ QpProblem CentroidalMpc::buildProblem(MujocoModelInterface& robot, const Centroi
     x0.segment(6, 3) = quatToRpy(robot.data()->qpos + 3);
     x0.segment(9, 3) = robot.baseAngularVelocity();
 
-    MatrixX P = MatrixX::Zero(nvar, nvar);
+    std::vector<SparseEntry> p_entries;
+    std::vector<SparseEntry> a_entries;
+    p_entries.reserve(static_cast<size_t>(nvar + n_steps * kForceDimAll));
+    a_entries.reserve(static_cast<size_t>(12 + n_steps * (3 * 3 + 3 * 6 + 3 * 3 + 3 * 14 + kNumFeet * 9)));
     VectorX q = VectorX::Zero(nvar);
+
+    std::vector<double> p_diag(static_cast<size_t>(nvar), 1.0e-9);
 
     for (int step = 1; step <= n_steps; ++step) {
         int base = step * kStateDim;
         for (int axis = 0; axis < 3; ++axis) {
-            P(base + axis, base + axis) += config_.weight_com_position;
+            p_diag[static_cast<size_t>(base + axis)] += config_.weight_com_position;
             q(base + axis) += -config_.weight_com_position * com_pos_ref(step, axis);
-            P(base + 3 + axis, base + 3 + axis) += config_.weight_com_velocity;
+            p_diag[static_cast<size_t>(base + 3 + axis)] += config_.weight_com_velocity;
             q(base + 3 + axis) += -config_.weight_com_velocity * com_vel_ref(step, axis);
-            P(base + 6 + axis, base + 6 + axis) += config_.weight_orientation;
+            p_diag[static_cast<size_t>(base + 6 + axis)] += config_.weight_orientation;
             q(base + 6 + axis) += -config_.weight_orientation * ori_ref(step, axis);
-            P(base + 9 + axis, base + 9 + axis) += config_.weight_angular_velocity;
+            p_diag[static_cast<size_t>(base + 9 + axis)] += config_.weight_angular_velocity;
             q(base + 9 + axis) += -config_.weight_angular_velocity * omega_ref(step, axis);
         }
     }
@@ -142,7 +194,7 @@ QpProblem CentroidalMpc::buildProblem(MujocoModelInterface& robot, const Centroi
             int foot_id = static_cast<int>(foot);
             int base = forceIndex(n_state_vars, step, 3 * foot_id);
             for (int axis = 0; axis < 3; ++axis) {
-                P(base + axis, base + axis) += config_.weight_force_regularization;
+                p_diag[static_cast<size_t>(base + axis)] += config_.weight_force_regularization;
             }
             if (input.contact_schedule[static_cast<size_t>(step)][static_cast<size_t>(foot)]) {
                 q(base + 2) += -config_.weight_force_regularization * fz_ref;
@@ -155,16 +207,15 @@ QpProblem CentroidalMpc::buildProblem(MujocoModelInterface& robot, const Centroi
             int prev = forceIndex(n_state_vars, step - 1, 0);
             int curr = forceIndex(n_state_vars, step, 0);
             for (int idx = 0; idx < kForceDimAll; ++idx) {
-                P(prev + idx, prev + idx) += config_.weight_force_rate;
-                P(curr + idx, curr + idx) += config_.weight_force_rate;
-                P(prev + idx, curr + idx) += -config_.weight_force_rate;
-                P(curr + idx, prev + idx) += -config_.weight_force_rate;
+                p_diag[static_cast<size_t>(prev + idx)] += config_.weight_force_rate;
+                p_diag[static_cast<size_t>(curr + idx)] += config_.weight_force_rate;
+                addEntry(&p_entries, prev + idx, curr + idx, -config_.weight_force_rate);
             }
         }
     }
 
     for (int i = 0; i < nvar; ++i) {
-        P(i, i) += 1.0e-9;
+        addEntry(&p_entries, i, i, p_diag[static_cast<size_t>(i)]);
     }
 
     int dyn_rows = (n_steps + 1) * kStateDim;
@@ -176,7 +227,7 @@ QpProblem CentroidalMpc::buildProblem(MujocoModelInterface& robot, const Centroi
     int row = 0;
 
     for (int idx = 0; idx < kStateDim; ++idx) {
-        A(row, idx) = 1.0;
+        addEntry(&a_entries, row, idx, 1.0);
         lower(row) = x0(idx);
         upper(row) = x0(idx);
         row++;
@@ -188,19 +239,19 @@ QpProblem CentroidalMpc::buildProblem(MujocoModelInterface& robot, const Centroi
         int uk = n_state_vars + step * kForceDimAll;
 
         for (int axis = 0; axis < 3; ++axis) {
-            A(row, xkp1 + axis) = 1.0;
-            A(row, xk + axis) = -1.0;
-            A(row, xk + 3 + axis) = -config_.dt;
+            addEntry(&a_entries, row, xkp1 + axis, 1.0);
+            addEntry(&a_entries, row, xk + axis, -1.0);
+            addEntry(&a_entries, row, xk + 3 + axis, -config_.dt);
             lower(row) = 0.0;
             upper(row) = 0.0;
             row++;
         }
 
         for (int axis = 0; axis < 3; ++axis) {
-            A(row, xkp1 + 3 + axis) = 1.0;
-            A(row, xk + 3 + axis) = -1.0;
+            addEntry(&a_entries, row, xkp1 + 3 + axis, 1.0);
+            addEntry(&a_entries, row, xk + 3 + axis, -1.0);
             for (int force_axis = axis; force_axis < kForceDimAll; force_axis += 3) {
-                A(row, uk + force_axis) = -config_.dt / mass;
+                addEntry(&a_entries, row, uk + force_axis, -config_.dt / mass);
             }
             lower(row) = config_.dt * gravity(axis);
             upper(row) = config_.dt * gravity(axis);
@@ -208,19 +259,19 @@ QpProblem CentroidalMpc::buildProblem(MujocoModelInterface& robot, const Centroi
         }
 
         for (int axis = 0; axis < 3; ++axis) {
-            A(row, xkp1 + 6 + axis) = 1.0;
-            A(row, xk + 6 + axis) = -1.0;
-            A(row, xk + 9 + axis) = -config_.dt;
+            addEntry(&a_entries, row, xkp1 + 6 + axis, 1.0);
+            addEntry(&a_entries, row, xk + 6 + axis, -1.0);
+            addEntry(&a_entries, row, xk + 9 + axis, -config_.dt);
             lower(row) = 0.0;
             upper(row) = 0.0;
             row++;
         }
 
         for (int axis = 0; axis < 3; ++axis) {
-            A(row, xkp1 + 9 + axis) = 1.0;
-            A(row, xk + 9 + axis) = -1.0;
+            addEntry(&a_entries, row, xkp1 + 9 + axis, 1.0);
+            addEntry(&a_entries, row, xk + 9 + axis, -1.0);
             for (int force_idx = 0; force_idx < kForceDimAll; ++force_idx) {
-                A(row, uk + force_idx) = -config_.dt * angular_map(axis, force_idx);
+                addEntry(&a_entries, row, uk + force_idx, -config_.dt * angular_map(axis, force_idx));
             }
             lower(row) = 0.0;
             upper(row) = 0.0;
@@ -236,31 +287,31 @@ QpProblem CentroidalMpc::buildProblem(MujocoModelInterface& robot, const Centroi
             int fy = fx + 1;
             int fz = fx + 2;
 
-            A(row, fx) = 1.0;
-            A(row, fz) = -config_.friction_mu;
+            addEntry(&a_entries, row, fx, 1.0);
+            addEntry(&a_entries, row, fz, -config_.friction_mu);
             lower(row) = stance ? -kInf : 0.0;
             upper(row) = 0.0;
             row++;
 
-            A(row, fx) = -1.0;
-            A(row, fz) = -config_.friction_mu;
+            addEntry(&a_entries, row, fx, -1.0);
+            addEntry(&a_entries, row, fz, -config_.friction_mu);
             lower(row) = stance ? -kInf : 0.0;
             upper(row) = 0.0;
             row++;
 
-            A(row, fy) = 1.0;
-            A(row, fz) = -config_.friction_mu;
+            addEntry(&a_entries, row, fy, 1.0);
+            addEntry(&a_entries, row, fz, -config_.friction_mu);
             lower(row) = stance ? -kInf : 0.0;
             upper(row) = 0.0;
             row++;
 
-            A(row, fy) = -1.0;
-            A(row, fz) = -config_.friction_mu;
+            addEntry(&a_entries, row, fy, -1.0);
+            addEntry(&a_entries, row, fz, -config_.friction_mu);
             lower(row) = stance ? -kInf : 0.0;
             upper(row) = 0.0;
             row++;
 
-            A(row, fz) = 1.0;
+            addEntry(&a_entries, row, fz, 1.0);
             lower(row) = stance ? config_.normal_force_min : 0.0;
             upper(row) = stance ? kInf : 0.0;
             row++;
@@ -268,9 +319,9 @@ QpProblem CentroidalMpc::buildProblem(MujocoModelInterface& robot, const Centroi
     }
 
     QpProblem problem;
-    problem.P = denseToCSC(P, true);
+    problem.P = entriesToCSC(nvar, nvar, p_entries);
     problem.q = q;
-    problem.A = denseToCSC(A, false);
+    problem.A = entriesToCSC(ncon, nvar, a_entries);
     problem.lower = lower;
     problem.upper = upper;
     return problem;
