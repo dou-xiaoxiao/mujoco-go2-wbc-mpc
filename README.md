@@ -77,13 +77,9 @@ no terrain locomotion or large-scale RL training yet
 
 ## Demo
 
-The clearest visual demo is an offline rollout followed by fixed-rate replay in
-the MuJoCo viewer:
-
-```powershell
-cd D:\projects\quadruped_project\mujoco_wbc_project
-.\.venv\Scripts\python.exe -B .\scripts\record_trot_demo.py --preset trot-l-turn-stop --no-gif --viewer-replay
-```
+The current visual example is a scripted diagonal-trot route in MuJoCo. It uses
+an offline closed-loop rollout followed by fixed-rate replay, so the video is
+not tied to Python's real-time QP solve speed.
 
 The route contains:
 
@@ -95,50 +91,8 @@ additional straight walking
 final stop
 ```
 
-A shorter straight-walking replay can be run with:
-
-```powershell
-.\.venv\Scripts\python.exe -B .\scripts\record_trot_demo.py --preset straight --no-gif --viewer-replay
-```
-
-To regenerate the GIF used above:
-
-```powershell
-.\.venv\Scripts\python.exe -B .\scripts\record_trot_demo.py --preset trot-l-turn-stop
-```
-
-For controller debugging, the live viewer runs MPC/WBC online while drawing:
-
-```powershell
-.\.venv\Scripts\python.exe -B .\scripts\run_trot_reference_viewer.py --vx 0.012
-```
-
-The live viewer can look less smooth than replay because Python solves the QPs
-while rendering.
-
-## Setup
-
-The project was developed with Python 3.12 on Windows.
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
-
-The Unitree Go2 model is included through the `mujoco_menagerie` submodule:
-
-```powershell
-git submodule update --init --recursive
-```
-
-Basic checks:
-
-```powershell
-.\.venv\Scripts\python.exe -B .\scripts\check_mujoco_install.py
-.\.venv\Scripts\python.exe -B .\scripts\launch_go2_viewer.py
-.\.venv\Scripts\python.exe -B .\scripts\validate_control_stack.py
-```
+The main script is `scripts/record_trot_demo.py`. Basic implementation checks
+are collected in `scripts/validate_control_stack.py`.
 
 ## Mathematical Interface
 
