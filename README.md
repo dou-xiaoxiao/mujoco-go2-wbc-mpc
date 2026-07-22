@@ -1,11 +1,12 @@
-# MuJoCo Go2 SRB-MPC and Full-Body WBC Locomotion
+# MuJoCo Go2 MPC/WBC Locomotion Study
 
-This repository implements a dynamics-based quadruped locomotion control stack
-for a Unitree Go2 model in MuJoCo. The project focuses on a clear and
-inspectable implementation of single-rigid-body MPC and full-body whole-body
-control, rather than on highly tuned high-speed gait performance.
+This repository is a study and research prototype on model-based quadruped
+locomotion control. I built it to understand how a floating-base legged robot
+can be controlled through a layered MPC/WBC architecture in MuJoCo.
 
-The main control pipeline is:
+The current implementation is not meant to be an industrial locomotion stack.
+Its purpose is to make the main mathematical interfaces explicit and test them
+in simulation:
 
 ```text
 MuJoCo floating-base state
@@ -18,39 +19,73 @@ MuJoCo floating-base state
 
 ![Trot route demo](docs/assets/trot_l_route_demo.gif)
 
-## Highlights
+## Motivation
 
-- Unitree Go2 floating-base MuJoCo model with `nq=19`, `nv=18`, and `nu=12`.
-- Explicit generalized coordinate, generalized velocity, world-frame, base-frame,
-  and foot Jacobian conventions.
-- MuJoCo-based access to `M(q)`, `h(q,v)`, `B`, foot Jacobians, `Jdot*v`, COM,
-  and composite inertia quantities.
-- Single-rigid-body / centroidal MPC that optimizes per-foot world-frame contact
-  force references over a prediction horizon.
-- Full-body WBC QP with decision variables `[vdot, tau, f]`.
-- Support for four-foot stance, single-leg swing, crawl-like contact modes, and
-  diagonal trot contact modes through a generic contact-mode WBC.
-- Offline rollout and fixed-rate MuJoCo replay for smooth demonstration videos,
-  independent of Python QP runtime.
-- Basic profiling hooks for the WBC solve path and cached actuation matrix
-  support for the Go2 MuJoCo model.
-- A plain C++ MPC/WBC implementation using Eigen, the MuJoCo C API, and the
-  OSQP C API for headless speed checks and future real-time development.
+The project started from a simple question:
+
+```text
+How can a quadruped controller go beyond foot-level IK or joint-space PD,
+and instead compute torques from the full floating-base dynamics?
+```
+
+The implementation therefore focuses on:
+
+- MuJoCo model access for a Unitree Go2 robot;
+- floating-base generalized coordinates and velocities;
+- mass matrix, bias force, actuation matrix, foot Jacobians, and `Jdot*v`;
+- contact-force planning with a single-rigid-body MPC;
+- torque generation with a full-body WBC quadratic program;
+- stance, swing, crawl-like, and diagonal-trot contact modes in simulation.
+
+## Current Status
+
+The repository contains two versions of the control stack.
+
+The Python version is the main experimental version. It is easier to inspect and
+contains the more mature reference and demonstration scripts.
+
+The C++ version is a smaller implementation using Eigen, the MuJoCo C API, and
+the OSQP C API. It was added to check the same MPC/WBC formulation in a more
+real-time-oriented language, but it is still a research implementation rather
+than a tuned controller.
+
+Implemented so far:
+
+```text
+Unitree Go2 MuJoCo model interface
+SRB-MPC contact-force QP
+full-body WBC-QP with z = [vdot, tau, f]
+four-foot stance
+single-leg swing
+crawl-like contact modes
+diagonal trot contact modes
+offline trot route replay
+basic WBC profiling
+C++ headless MPC/WBC rollout
+```
+
+Current limitations:
+
+```text
+no real robot deployment
+no hardware state estimator
+limited touchdown/load-transfer tuning
+limited gait and foothold planning
+not optimized as a real-time control stack
+no terrain locomotion or large-scale RL training yet
+```
 
 ## Demo
 
-Recommended public demo:
+The clearest visual demo is an offline rollout followed by fixed-rate replay in
+the MuJoCo viewer:
 
 ```powershell
 cd D:\projects\quadruped_project\mujoco_wbc_project
 .\.venv\Scripts\python.exe -B .\scripts\record_trot_demo.py --preset trot-l-turn-stop --no-gif --viewer-replay
 ```
 
-This command first rolls out the closed-loop controller headlessly, stores the
-state trajectory, and then replays the stored trajectory in the MuJoCo viewer at
-a fixed visual frame rate.
-
-The `trot-l-turn-stop` preset performs:
+The route contains:
 
 ```text
 straight walking
@@ -60,30 +95,30 @@ additional straight walking
 final stop
 ```
 
-Short straight-walking replay:
+A shorter straight-walking replay can be run with:
 
 ```powershell
 .\.venv\Scripts\python.exe -B .\scripts\record_trot_demo.py --preset straight --no-gif --viewer-replay
 ```
 
-Generate a GIF:
+To regenerate the GIF used above:
 
 ```powershell
 .\.venv\Scripts\python.exe -B .\scripts\record_trot_demo.py --preset trot-l-turn-stop
 ```
 
-Live viewer version for debugging:
+For controller debugging, the live viewer runs MPC/WBC online while drawing:
 
 ```powershell
 .\.venv\Scripts\python.exe -B .\scripts\run_trot_reference_viewer.py --vx 0.012
 ```
 
-The live viewer solves MPC/WBC while drawing frames, so it can look less smooth
-than the offline replay on slower Python runs.
+The live viewer can look less smooth than replay because Python solves the QPs
+while rendering.
 
-## Installation
+## Setup
 
-Python 3.12 is recommended.
+The project was developed with Python 3.12 on Windows.
 
 ```powershell
 python -m venv .venv
@@ -91,156 +126,23 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-The Unitree Go2 model is provided through the `mujoco_menagerie` Git submodule.
-After cloning the repository, initialize submodules:
+The Unitree Go2 model is included through the `mujoco_menagerie` submodule:
 
 ```powershell
 git submodule update --init --recursive
 ```
 
-Check the MuJoCo installation:
+Basic checks:
 
 ```powershell
 .\.venv\Scripts\python.exe -B .\scripts\check_mujoco_install.py
-```
-
-Open the raw Go2 model:
-
-```powershell
 .\.venv\Scripts\python.exe -B .\scripts\launch_go2_viewer.py
-```
-
-## Validation
-
-Run the control-stack regression checks:
-
-```powershell
 .\.venv\Scripts\python.exe -B .\scripts\validate_control_stack.py
-```
-
-The validation covers:
-
-```text
-actuation matrix cache consistency
-contact phase semantics
-static stance WBC
-single-leg swing WBC
-general WBC crawl mode
-general WBC diagonal trot mode
-SRB-MPC all-stance mode
-SRB-MPC swing-foot force-zero constraint
-```
-
-Low-frame-rate full route stability check:
-
-```powershell
-.\.venv\Scripts\python.exe -B .\scripts\record_trot_demo.py --preset trot-l-route --no-gif --fps 1 --log-dt 20 --stop-on-fall
-```
-
-WBC internal timing in the live viewer:
-
-```powershell
-.\.venv\Scripts\python.exe -B .\scripts\run_trot_reference_viewer.py --vx 0.012 --wbc-profile
-```
-
-## C++ Implementation
-
-The `cpp/` directory contains a real C++ implementation of the same control
-pipeline:
-
-```text
-MuJoCo model interface
-    -> SRB-MPC QP solved by OSQP C API
-    -> full-body WBC QP solved by OSQP C API
-    -> torque command
-    -> MuJoCo step
-```
-
-Build and run:
-
-```powershell
-$env:Path = "D:\projects\quadruped_project\tools\w64devkit\bin;" + $env:Path
-.\..\tools\w64devkit\bin\cmake.exe -S cpp -B cpp\build-osqp -G Ninja "-DCMAKE_CXX_COMPILER=g++.exe" "-DCMAKE_MAKE_PROGRAM=D:\projects\quadruped_project\tools\w64devkit\bin\ninja.exe"
-.\..\tools\w64devkit\bin\cmake.exe --build cpp\build-osqp --config Release
-
-.\cpp\build-osqp\solve_wbc_once.exe .\models\mujoco_menagerie\unitree_go2\scene.xml
-.\cpp\build-osqp\solve_mpc_once.exe .\models\mujoco_menagerie\unitree_go2\scene.xml
-.\cpp\build-osqp\run_trot_rollout.exe .\models\mujoco_menagerie\unitree_go2\scene.xml 0.012 0.08
-.\cpp\build-osqp\run_trot_rollout.exe .\models\mujoco_menagerie\unitree_go2\scene.xml route cpp_outputs/cpp_trot_route.csv
-```
-
-The C++ route rollout is currently a performance and architecture check, not
-the recommended public visual demo. The Python route demo has the more mature
-reference/planner tuning and should be used for presentation videos.
-
-Save and render a C++ route rollout for debugging:
-
-```powershell
-.\cpp\build-osqp\run_trot_rollout.exe .\models\mujoco_menagerie\unitree_go2\scene.xml route cpp_outputs/cpp_trot_route.csv
-.\.venv\Scripts\python.exe -B .\scripts\render_cpp_rollout_gif.py --csv .\cpp_outputs\cpp_trot_route.csv --gif-output .\cpp_outputs\cpp_trot_route.gif --stride 4 --fps 30 --playback-speed 2.0
-```
-
-Example local headless results:
-
-```text
-straight / turning trot: sim_per_wall ~= 1.8-2.2
-average WBC solve ~= 0.36-0.40 ms
-average MPC solve ~= 31-37 ms
-average MuJoCo step ~= 0.04 ms
-```
-
-This C++ path is still a research implementation. It solves the MPC and WBC
-QPs online during the rollout and does not use a pre-recorded torque sequence.
-
-## Project Layout
-
-```text
-mujoco_wbc_project/
-|-- README.md
-|-- requirements.txt
-|-- models/
-|   |-- free_body_smoke.xml
-|   `-- mujoco_menagerie/        # Git submodule with the Unitree Go2 model
-|-- src/mujoco_wbc/
-|   |-- model_interface.py       # MuJoCo dynamics and kinematics wrapper
-|   |-- centroidal_mpc.py        # SRB-MPC contact-force QP
-|   |-- wbc_qp.py                # full-body WBC QP
-|   |-- contact_schedule.py      # stance/swing schedule helpers
-|   |-- swing_trajectory.py      # swing-foot reference generation
-|   |-- planning.py              # simple command/reference helpers
-|   |-- reference_inputs.py      # reference and contact-mode data structures
-|   |-- support_polygon.py       # support geometry helpers
-|   |-- profiling.py             # loop timing utilities
-|   `-- conventions.py           # coordinate and naming conventions
-|-- scripts/
-|   |-- validate_control_stack.py
-|   |-- record_trot_demo.py
-|   |-- run_trot_reference_viewer.py
-|   |-- run_commanded_crawl_viewer.py
-|   |-- run_srb_mpc_crawl_continuous_viewer.py
-|   |-- run_static_stance_once.py
-|   |-- run_static_stance_viewer.py
-|   |-- run_single_leg_swing_once.py
-|   |-- run_single_leg_swing_viewer.py
-|   |-- inspect_go2_dynamics.py
-|   |-- inspect_frame_conventions.py
-|   |-- launch_go2_viewer.py
-|   `-- check_mujoco_install.py
-|-- cpp/
-|   |-- CMakeLists.txt
-|   |-- include/go2wbc/         # C++ control interfaces
-|   |-- src/                    # MuJoCo interface, OSQP wrapper, MPC, WBC
-|   `-- apps/                   # dynamics, QP, and headless rollout executables
-`-- docs/
-    |-- control_stack.md
-    |-- mainline_architecture.md
-    |-- project_structure.md
-    `-- locomotion_reference_map.md
 ```
 
 ## Mathematical Interface
 
-### Generalized Coordinates
+### MuJoCo State Convention
 
 The Go2 model uses MuJoCo's floating-base representation:
 
@@ -262,7 +164,7 @@ nv = 18
 nu = 12
 ```
 
-### Full-Body WBC QP
+### WBC-QP
 
 The WBC decision variable is:
 
@@ -270,45 +172,42 @@ The WBC decision variable is:
 z = [vdot, tau, f]
 ```
 
-with:
+where:
 
 ```text
 vdot in R^18     generalized acceleration
 tau  in R^12     joint torque command
-f    in R^(3nc)  stance-foot contact forces, expressed in world frame
+f    in R^(3nc)  stance-foot contact forces in world frame
 ```
 
-Hard constraints:
+The main dynamics constraint is:
 
 ```text
 M(q) vdot + h(q,v) = B tau + J_c(q)^T f
-J_c(q) vdot + Jdot_c(q,v) v = a_c_cmd
-tau_min <= tau <= tau_max
-|fx| <= mu fz
-|fy| <= mu fz
-fz >= 0
 ```
 
-Soft tasks:
+The WBC also uses:
 
 ```text
-base position and orientation acceleration tracking
-nominal joint posture tracking
+stance-foot acceleration constraints
+friction pyramid constraints
+torque limits
 swing-foot acceleration tracking
+base/body reference tracking
 MPC contact-force reference tracking
-torque and contact-force regularization
+regularization on torque and contact force
 ```
 
 ### SRB-MPC
 
-The MPC uses a single-rigid-body / centroidal approximation:
+The MPC uses a single-rigid-body approximation:
 
 ```text
 x = [com_pos, com_vel, theta, omega]
 u = [f_FL, f_FR, f_RL, f_RR]
 ```
 
-Discrete dynamics:
+with discrete dynamics:
 
 ```text
 p[k+1]     = p[k] + dt v[k]
@@ -317,55 +216,64 @@ theta[k+1] = theta[k] + dt omega[k]
 omega[k+1] = omega[k] + dt I_W^-1 sum_i (p_i - com) x f_i[k]
 ```
 
-`theta` is a small-angle orientation state around the current linearization
-point, not a global quaternion state.
+The MPC predicts per-foot contact forces. The WBC then tracks the first-knot
+force reference while enforcing the full floating-base dynamics at the current
+simulation step.
 
-Contact constraints:
+## Repository Layout
 
 ```text
-stance foot: friction pyramid, fz >= normal_force_min
-swing foot:  f = 0
+src/mujoco_wbc/
+    model_interface.py       MuJoCo dynamics and kinematics wrapper
+    centroidal_mpc.py        SRB-MPC contact-force QP
+    wbc_qp.py                full-body WBC QP
+    contact_schedule.py      stance/swing schedule helpers
+    swing_trajectory.py      swing-foot reference generation
+    planning.py              simple command/reference helpers
+
+scripts/
+    validate_control_stack.py
+    record_trot_demo.py
+    run_trot_reference_viewer.py
+    run_commanded_crawl_viewer.py
+    run_static_stance_viewer.py
+    run_single_leg_swing_viewer.py
+    inspect_go2_dynamics.py
+    inspect_frame_conventions.py
+
+cpp/
+    include/go2wbc/          C++ interfaces
+    src/                     MuJoCo interface, OSQP wrapper, MPC, WBC
+    apps/                    small executables for checks and rollout
+
+docs/
+    control_stack.md
+    mainline_architecture.md
+    project_structure.md
+    locomotion_reference_map.md
 ```
 
-The MPC outputs the first-knot per-foot contact force reference. The WBC then
-tracks that force reference while enforcing the full floating-base dynamics.
+## Possible Tesina Direction
 
-## Current Scope
-
-Implemented and validated:
+One possible continuation of this work is:
 
 ```text
-MuJoCo Go2 model interface
-SRB-MPC contact-force planning
-full-body WBC QP
-generic non-flight contact-mode WBC
-stance, single-leg swing, crawl-mode, and diagonal-trot checks
-stable offline route replay demo
-WBC profiling and cached actuation matrix validation
-C++ headless MPC/WBC rollout for straight and turning trot
+Learning-Based Foothold and Reference Adaptation
+for MPC/WBC-Based Quadruped Locomotion
 ```
 
-Out of scope for the current Python prototype:
+The idea would be to keep MPC/WBC as the model-based low-level controller and
+add a lightweight learning-based module that adapts foothold placement or
+body-reference commands. A small tesina-scale version could stay fully in
+MuJoCo simulation and compare the learned adapter with the current rule-based
+reference generation during diagonal trot, turning, and mild disturbances.
+
+Other possible continuations:
 
 ```text
-hardware real-time deployment
-hardware state estimation
-hardware deployment
-robust touchdown and load-transfer handling
-high-speed natural trot
-terrain locomotion
-large-scale RL training
-```
-
-## Future Work
-
-Possible extensions include:
-
-```text
-1. ROS 2 integration with fixed-size data structures and reusable QP memory.
-2. Fixed-sparsity WBC formulation with a constant 42-dimensional decision vector.
-3. Improved foothold and body-reference generation.
-4. Contact transition handling with force ramps and touchdown hysteresis.
-5. Hardware-oriented state-estimation and actuator-interface integration.
-6. RL residual policies on top of MPC/WBC references.
+ROS 2 / C++ integration
+fixed-size real-time QP formulation
+contact transition and touchdown handling
+more systematic gait and foothold planning
+terrain-aware locomotion experiments
 ```
