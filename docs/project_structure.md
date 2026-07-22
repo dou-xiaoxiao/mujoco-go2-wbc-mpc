@@ -119,9 +119,8 @@ scripts/run_trot_reference_viewer.py
 scripts/run_commanded_crawl_viewer.py
 ```
 
-`record_trot_demo.py` is the preferred public demonstration entry point. It
-first performs a headless closed-loop rollout, then replays the stored states at
-a fixed visual frame rate.
+`record_trot_demo.py` first performs a headless closed-loop rollout, then
+replays the stored states at a fixed visual frame rate.
 
 ## 3. Recommended Review Order
 
@@ -170,9 +169,3 @@ viewer/demo scripts
   input: command/reference parameters
   output: MuJoCo simulation, replay, or rendered GIF
 ```
-
-## 4. Public Documentation
-
-The public documentation is kept focused on the control architecture and
-mathematical interfaces. Personal study notes and language-learning material
-are intentionally excluded from the repository documentation.

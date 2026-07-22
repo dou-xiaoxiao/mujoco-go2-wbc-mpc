@@ -37,7 +37,7 @@ GeneralContactWBCQP
 
 ## Main Demo Path
 
-The recommended public demo is:
+The main demo script is:
 
 ```text
 scripts/record_trot_demo.py --preset trot-l-turn-stop
@@ -114,7 +114,7 @@ stable replay demos
 WBC timing instrumentation
 ```
 
-Out of scope for the current stable branch:
+Out of scope for the current repository:
 
 ```text
 large-scale RL

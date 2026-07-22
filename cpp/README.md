@@ -1,7 +1,7 @@
 # C++ MPC/WBC Implementation
 
 This directory contains a plain C++ implementation of the MuJoCo Go2
-locomotion control stack. The Python stack remains the recommended visual demo,
+locomotion control stack. The Python stack contains the main visual examples,
 while the C++ stack is used to test the same control ideas with lower runtime
 overhead and a clearer path toward real-time deployment.
 
@@ -32,8 +32,8 @@ headless diagonal trot rollout:
     MPC force reference -> WBC torque -> MuJoCo step
 ```
 
-This is a real QP-based controller path. The rollout applications do not use a
-PD-only fallback or a pre-recorded torque sequence.
+The rollout applications solve the MPC and WBC QPs online during the MuJoCo
+simulation step.
 
 ## Build On Windows
 
@@ -77,8 +77,8 @@ run_trot_rollout.exe <model.xml> route [record_csv]
 
 The `route` mode is a simple sequence: straight walking, left turning, more
 straight walking, and a final stop. It is intended for performance and
-architecture checks. The Python route demo currently has more mature
-reference/planner tuning and should be used for public visual presentation.
+architecture checks. The Python route example currently contains the reference
+and planner settings used for the main visual demo.
 
 To save a C++ route rollout and render it as a debugging GIF:
 

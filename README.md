@@ -42,7 +42,7 @@ The implementation therefore focuses on:
 The repository contains two versions of the control stack.
 
 The Python version is the main experimental version. It is easier to inspect and
-contains the more mature reference and demonstration scripts.
+contains the reference and demonstration scripts used in the current examples.
 
 The C++ version is a smaller implementation using Eigen, the MuJoCo C API, and
 the OSQP C API. It was added to check the same MPC/WBC formulation in a more
